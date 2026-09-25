@@ -137,6 +137,7 @@ void Solver::start() {
     m_key = levelKey(m_layer);
     m_twoPlayer = m_layer->m_levelSettings && m_layer->m_levelSettings->m_twoPlayerMode;
     m_startTime = Clock::now();
+    m_lastLog = m_startTime;
     m_savedClickBetweenSteps = m_layer->m_clickBetweenSteps;
     m_layer->m_clickBetweenSteps = false;
     captureStats();
@@ -202,12 +203,17 @@ void Solver::runFrame() {
         if (!keepGoing) break;
         if (Clock::now() - frameStart >= budget) break;
     }
+    if (running() && Clock::now() - m_lastLog >= std::chrono::seconds(10)) {
+        m_lastLog = Clock::now();
+        log::info("Solver: {} | {} | tick {} / max {}", statusLine(), detailLine(), m_tick, m_maxTick);
+    }
 }
 
 bool Solver::simulate() {
     int before = m_tick;
+    int steps = m_stepsPerUpdate - (((m_tick % m_stepsPerUpdate) + m_stepsPerUpdate) % m_stepsPerUpdate);
     m_inStep = true;
-    m_layer->update(static_cast<float>(m_stepsPerUpdate / 240.0));
+    m_layer->update(static_cast<float>(steps / 240.0));
     m_inStep = false;
     if (m_diedThisStep || m_completedThisStep) {
         afterStep(false);

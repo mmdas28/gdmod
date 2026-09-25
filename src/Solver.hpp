@@ -184,6 +184,7 @@ private:
 
     Clock::time_point m_startTime;
     Clock::time_point m_refineDeadline;
+    Clock::time_point m_lastLog;
     uint64_t m_totalSteps = 0;
     uint64_t m_backtracks = 0;
     uint64_t m_prunes = 0;
