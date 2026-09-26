@@ -137,6 +137,7 @@ private:
     double m_cpCostUs = 250.0;
     bool m_finalIsRefined = false;
     bool m_replayFallbackUsed = false;
+    bool m_replayFromRepair = false;
 
     int m_stepsPerUpdate = 2;
     int m_inputResolution = 1;

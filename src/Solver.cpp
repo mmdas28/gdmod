@@ -214,6 +214,7 @@ void Solver::start() {
     m_fastAllowed = false;
     m_finalIsRefined = false;
     m_replayFallbackUsed = false;
+    m_replayFromRepair = false;
     setLayerHidden(true);
 
     log::info(
@@ -504,6 +505,7 @@ void Solver::beforeStep(bool halfTick) {
         }
         case Phase::Search: {
             if (t < static_cast<int>(m_path.size())) {
+                if (m_path[t].hash == 0) m_path[t].hash = stateHash(t);
                 applyHeld(m_path[t].held);
                 break;
             }
@@ -665,6 +667,7 @@ void Solver::beginSearchFresh() {
     m_best.clear();
     m_maxTick = 0;
     m_maxPercent = 0.f;
+    m_replayFromRepair = false;
     m_phase = Phase::Search;
     if (m_restoreMode == RestoreMode::Checkpoint) createCheckpointHere();
 }
@@ -726,7 +729,7 @@ void Solver::dfsBacktrack(int failNode) {
             restoreTo(t);
             return;
         }
-        m_dead.insert(m_path.back().hash);
+        if (m_path.back().hash != 0) m_dead.insert(m_path.back().hash);
         m_path.pop_back();
         if (m_maxTick - t > m_maxBacktrackTicks) {
             if (trySearchFallback()) return;
@@ -748,8 +751,8 @@ bool Solver::trySearchFallback() {
         log::warn("Solver: no path found with fast simulation, searching again in full mode");
         m_fastAllowed = false;
     }
-    else if (m_restoreMode == RestoreMode::Checkpoint && !m_replayFallbackUsed) {
-        log::warn("Solver: no path found with checkpoint rollback, searching again in exact replay mode");
+    else if (!m_replayFallbackUsed && (m_restoreMode == RestoreMode::Checkpoint || m_replayFromRepair)) {
+        log::warn("Solver: no path found, searching again from the start in exact replay mode");
         m_replayFallbackUsed = true;
         m_restoreMode = RestoreMode::Replay;
     }
@@ -872,6 +875,11 @@ void Solver::onVerifyFailed(int tick) {
     if (m_verifyFailures >= 3 && m_restoreMode == RestoreMode::Checkpoint) {
         log::warn("Solver: switching to exact replay mode");
         m_restoreMode = RestoreMode::Replay;
+        m_replayFromRepair = true;
+        for (auto& node : m_path) {
+            node.tried = static_cast<uint8_t>(1u << node.held);
+            node.hash = 0;
+        }
     }
     if (m_verifyFailures >= 2) m_dead.clear();
 
