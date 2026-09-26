@@ -87,6 +87,78 @@ void setOverlayVisible(Session& s, bool visible) {
     if (s.overlay) s.overlay->setVisible(visible);
 }
 
+void holdAudio(Session& s, bool hold) {
+    auto layer = s.layer;
+    if (!layer) return;
+    if (hold) {
+        auto engine = FMODAudioEngine::sharedEngine();
+        if (s.audioHeld && (!engine || engine->m_allAudioPaused)) return;
+        layer->pauseAudio();
+        s.audioHeld = true;
+    }
+    else if (s.audioHeld) {
+        s.audioHeld = false;
+        layer->resumeAudio();
+    }
+}
+
+bool currentFlip(Session const& s) {
+    if (!s.ref.twoPlayer) return false;
+    auto gm = GameManager::sharedState();
+    return gm && gm->getGameVariable("0010");
+}
+
+void rememberRefInputs(Session& s) {
+    auto layer = s.layer;
+    s.refStartPos = layer ? layer->m_startPosObject : nullptr;
+    s.refStartPosAt = s.refStartPos ? s.refStartPos->getPosition() : CCPoint{0.f, 0.f};
+    s.refFlip = currentFlip(s);
+}
+
+bool refStale(Session const& s) {
+    auto layer = s.layer;
+    if (!layer || !s.refReady) return false;
+    auto startPos = layer->m_startPosObject;
+    if (startPos != s.refStartPos) return true;
+    if (startPos && layer->m_gameState.m_levelTime <= 0.0 && !startPos->getPosition().equals(s.refStartPosAt)) return true;
+    return currentFlip(s) != s.refFlip;
+}
+
+void loadRefData(Session& s) {
+    s.ref = makeLevelRef(s.layer);
+    s.refReady = true;
+    rememberRefInputs(s);
+    s.chart = loadChart(s.ref);
+    s.chartOutdated = s.chart && chartOutdated(s.ref, *s.chart);
+    s.progress = loadProgressSummary(s.ref);
+    s.prefs = loadPrefs(s.ref);
+    if (s.chart) {
+        log::info(
+            "Loaded saved chart {} ({} + {} notes{})", s.ref.key(), s.chart->lanes[0].size(), s.chart->lanes[1].size(),
+            s.chartOutdated ? ", level changed since" : ""
+        );
+    }
+}
+
+float validTarget(float target) {
+    if (!std::isfinite(target) || target < 1.f || target > 100.f) return 100.f;
+    return target;
+}
+
+void useProgress(SolveRequest& request, SolveProgress progress) {
+    request.kind = SolveKind::Resume;
+    request.targetPercent = validTarget(progress.targetPercent);
+    request.progress = std::move(progress);
+}
+
+std::optional<SolveProgress> loadResumable(Session const& s) {
+    auto blob = loadProgressBlob(s.ref);
+    if (!blob) return std::nullopt;
+    auto progress = SolveProgress::deserialize(*blob);
+    if (!progress || progress->levelHash != s.ref.levelHash) return std::nullopt;
+    return progress;
+}
+
 void showMenu(Session& s) {
     auto layer = s.layer;
     if (!layer) return;
@@ -94,6 +166,7 @@ void showMenu(Session& s) {
     if (!menu) {
         log::warn("Rhythm Path: could not create the level menu");
         s.menuOpen = false;
+        s.menuAtLevelStart = false;
         return;
     }
     menu->m_scene = CCDirector::get()->getRunningScene();
@@ -147,8 +220,33 @@ void collectSolver(Session& s, bool announce) {
     refreshMenu(s);
 }
 
+void switchRef(Session& s) {
+    if (s.solver) {
+        if (s.solver->running()) cancelSolve(s);
+        else collectSolver(s, true);
+    }
+    auto oldKey = s.ref.key();
+    loadRefData(s);
+    log::info("Rhythm Path: start position changed ({} -> {})", oldKey, s.ref.key());
+    if (s.pendingRequest && s.pendingRequest->kind == SolveKind::Resume) {
+        auto& request = *s.pendingRequest;
+        request.kind = SolveKind::Fresh;
+        request.progress.reset();
+        request.targetPercent = s.prefs.targetPercent;
+        if (auto progress = loadResumable(s)) useProgress(request, std::move(*progress));
+    }
+    chartChanged(s);
+    refreshMenu(s);
+}
+
+void syncRef(Session& s) {
+    if (refStale(s)) switchRef(s);
+}
+
 void startPending(Session& s) {
     auto layer = s.layer;
+    syncRef(s);
+    if (!s.pendingRequest || s.solver) return;
     auto request = std::move(*s.pendingRequest);
     s.pendingRequest.reset();
     if (isPlatformer(layer)) {
@@ -161,10 +259,9 @@ void startPending(Session& s) {
     request.info.levelHash = s.ref.levelHash;
     request.info.variant = s.ref.variant;
     if (request.info.source.empty()) request.info.source = "solver";
-    if (!std::isfinite(request.targetPercent) || request.targetPercent < 1.f || request.targetPercent > 100.f) {
-        request.targetPercent = 100.f;
-    }
+    request.targetPercent = validTarget(request.targetPercent);
     s.lastSolverStatus.clear();
+    s.chartHidden = false;
     setOverlayVisible(s, true);
     s.solver = std::make_unique<Solver>(layer, s.ref);
     s.solver->start(std::move(request));
@@ -224,6 +321,8 @@ void Session::shutdown() {
     }
     pendingRequest.reset();
     menuOpen = false;
+    menuAtLevelStart = false;
+    holdAudio(*this, false);
     if (menu) {
         Ref<CCNode> node = menu;
         menu = nullptr;
@@ -240,24 +339,17 @@ void tickSession(Session& s) {
     if (!layer) return;
 
     if (!s.refReady) {
-        s.ref = makeLevelRef(layer);
-        s.refReady = true;
-        s.chart = loadChart(s.ref);
-        s.chartOutdated = s.chart && chartOutdated(s.ref, *s.chart);
-        s.progress = loadProgressSummary(s.ref);
-        s.prefs = loadPrefs(s.ref);
-        if (s.chart) {
-            log::info(
-                "Loaded saved chart {} ({} + {} notes{})", s.ref.key(), s.chart->lanes[0].size(), s.chart->lanes[1].size(),
-                s.chartOutdated ? ", level changed since" : ""
-            );
-        }
+        loadRefData(s);
         if (!s.menuShown && !s.solver && !s.pendingRequest && Mod::get()->getSettingValue<bool>("show-level-menu")) {
             s.menuOpen = true;
             s.menuShown = true;
             s.autoChecked = true;
+            s.menuAtLevelStart = true;
             g_menuWaitStart.reset();
         }
+    }
+    else {
+        syncRef(s);
     }
 
     if (!s.overlay && layer->getParent()) {
@@ -274,6 +366,7 @@ void tickSession(Session& s) {
     if (s.menuOpen && !s.menu) {
         if (s.solving()) {
             s.menuOpen = false;
+            s.menuAtLevelStart = false;
         }
         else if (sceneReady(layer)) {
             showMenu(s);
@@ -283,8 +376,8 @@ void tickSession(Session& s) {
             if (!g_menuWaitStart) g_menuWaitStart = now;
             if (std::chrono::duration<double>(now - *g_menuWaitStart).count() > kMenuWaitLimitSeconds) {
                 log::warn("Rhythm Path: the level scene never became active, not showing the menu");
-                s.menuOpen = false;
                 g_menuWaitStart.reset();
+                closeLevelMenu(s, true);
             }
         }
     }
@@ -297,22 +390,29 @@ void tickSession(Session& s) {
             SolveRequest request;
             request.kind = SolveKind::Fresh;
             request.targetPercent = s.prefs.targetPercent;
+            if (auto progress = loadResumable(s)) useProgress(request, std::move(*progress));
             s.pendingRequest = std::move(request);
         }
     }
 
     if (s.pendingRequest && !s.solver && !s.frozen() && layer->m_started && !layer->m_isPaused) startPending(s);
+
+    holdAudio(s, s.frozen());
 }
 
 void openLevelMenu(Session& s) {
     if (!s.layer || s.solving()) return;
     s.pendingRequest.reset();
+    s.chartHidden = false;
     setOverlayVisible(s, true);
     s.menuOpen = true;
     s.menuShown = true;
     s.autoChecked = true;
+    s.menuAtLevelStart = false;
     g_menuWaitStart.reset();
+    holdAudio(s, true);
     if (!s.refReady) return;
+    syncRef(s);
     s.progress = loadProgressSummary(s.ref);
     if (s.menu && s.menu->getParent()) {
         refreshMenu(s);
@@ -324,31 +424,51 @@ void openLevelMenu(Session& s) {
 
 void closeLevelMenu(Session& s, bool restartLevel) {
     s.menuOpen = false;
+    bool unplayed = s.menuAtLevelStart;
+    s.menuAtLevelStart = false;
     if (s.menu) {
         Ref<CCNode> node = s.menu;
         s.menu = nullptr;
         if (node->getParent()) node->removeFromParentAndCleanup(true);
     }
-    if (restartLevel && s.layer && !s.solving()) {
-        if (!s.layer->m_queuedButtons.empty()) s.layer->m_queuedButtons.clear();
-        s.layer->resetLevel();
+    holdAudio(s, false);
+    auto layer = s.layer;
+    if (restartLevel && layer && !s.solving()) {
+        if (!layer->m_queuedButtons.empty()) layer->m_queuedButtons.clear();
+        auto gsm = GameStatsManager::sharedState();
+        auto level = layer->m_level;
+        int layerAttempts = layer->m_attempts;
+        int statAttempts = gsm ? gsm->getStat("2") : 0;
+        int levelAttempts = level ? level->m_attempts.value() : 0;
+        layer->resetLevel();
+        if (unplayed) {
+            layer->m_attempts = layerAttempts;
+            if (gsm) gsm->setStat("2", statAttempts);
+            if (level) level->m_attempts = levelAttempts;
+            if (layer->m_attemptLabel) layer->m_attemptLabel->setString(fmt::format("Attempt {}", layerAttempts).c_str());
+        }
     }
 }
 
 void requestSolve(Session& s, SolveKind kind) {
     if (!s.layer || s.solving() || !s.refReady) return;
+    syncRef(s);
     SolveRequest request;
     request.kind = SolveKind::Fresh;
     request.targetPercent = s.prefs.targetPercent;
     if (kind == SolveKind::Resume) {
         std::optional<SolveProgress> progress;
         if (auto blob = loadProgressBlob(s.ref)) progress = SolveProgress::deserialize(*blob);
-        if (progress) {
-            request.kind = SolveKind::Resume;
-            request.progress = std::move(progress);
+        if (!progress) {
+            notify("The saved progress could not be read, starting over", NotificationIcon::Warning);
+        }
+        else if (progress->levelHash != s.ref.levelHash) {
+            notify("Saved progress is for an older version of this level, starting over", NotificationIcon::Warning);
+            deleteProgress(s.ref);
+            s.progress.reset();
         }
         else {
-            notify("The saved progress could not be read, starting over", NotificationIcon::Warning);
+            useProgress(request, std::move(*progress));
         }
     }
     closeLevelMenu(s, true);
@@ -356,11 +476,14 @@ void requestSolve(Session& s, SolveKind kind) {
     s.pendingRequest = std::move(request);
 }
 
-void requestImport(Session& s, std::filesystem::path const& path) {
-    if (!s.layer || !s.refReady || s.importBusy || s.solving()) return;
-    s.importBusy = true;
-    auto result = importInputsFromFile(path);
+static void finishImport(Session& s, std::filesystem::path const& path, Result<ImportedInputs> result) {
     s.importBusy = false;
+    s.importLoading = false;
+    if (!s.refReady || s.solving() || s.pendingRequest || !s.menuOpen) {
+        if (!s.menuOpen && result.isOk()) notify("Import cancelled because the level was started", NotificationIcon::Info);
+        refreshMenu(s);
+        return;
+    }
     if (result.isErr()) {
         auto error = result.unwrapErr();
         log::warn("Rhythm Path: import of {} failed: {}", utils::string::pathToString(path), error);
@@ -382,15 +505,16 @@ void requestImport(Session& s, std::filesystem::path const& path) {
             NotificationIcon::Warning
         );
     }
-    if (imported.usesP2 && !s.ref.twoPlayer) {
-        notify("The file has P2 inputs but this level is not 2-player", NotificationIcon::Warning);
+    if (!s.ref.twoPlayer) {
+        for (auto& value : imported.held) value = static_cast<uint8_t>((value | (value >> 1)) & 1);
+        imported.usesP2 = false;
     }
 
     SolveRequest request;
     request.kind = SolveKind::CheckImport;
     request.importSeq = std::move(imported.held);
     request.repairImport = Mod::get()->getSettingValue<bool>("repair-imports");
-    request.targetPercent = s.prefs.targetPercent;
+    request.targetPercent = 100.f;
     request.info.source = "import:" + sourceWord(imported.format);
     request.info.sourceFile = utils::string::pathToString(path.filename());
     log::info(
@@ -400,6 +524,36 @@ void requestImport(Session& s, std::filesystem::path const& path) {
     closeLevelMenu(s, true);
     s.lastSolverStatus.clear();
     s.pendingRequest = std::move(request);
+}
+
+void requestImport(Session& s, std::filesystem::path const& path) {
+    if (!s.layer || !s.refReady || s.importBusy || s.solving()) return;
+    syncRef(s);
+    ImportContext context;
+    context.twoPlayerLevel = s.ref.twoPlayer;
+    context.flipTwoPlayer = currentFlip(s);
+    s.importBusy = true;
+    s.importLoading = true;
+    refreshMenu(s);
+    Session* owner = &s;
+    uint64_t generation = g_generation;
+    (void)async::runtime().spawnBlocking<void>([owner, generation, path, context] {
+        auto result = [&]() -> Result<ImportedInputs> {
+            try {
+                return importInputsFromFile(path, context);
+            }
+            catch (std::exception const& e) {
+                return Err(fmt::format("The file could not be read: {}", e.what()));
+            }
+            catch (...) {
+                return Err(std::string("The file could not be read"));
+            }
+        }();
+        geode::queueInMainThread([owner, generation, path, result = std::move(result)]() mutable {
+            if (!sessionAlive(owner, generation)) return;
+            finishImport(*owner, path, std::move(result));
+        });
+    });
 }
 
 void pickImportFile(Session& s) {
@@ -432,20 +586,29 @@ void pickImportFile(Session& s) {
 }
 
 void playChart(Session& s) {
+    s.chartHidden = false;
     setOverlayVisible(s, true);
     closeLevelMenu(s, true);
 }
 
 void playWithoutChart(Session& s) {
-    setOverlayVisible(s, false);
+    s.chartHidden = true;
+    setOverlayVisible(s, true);
     closeLevelMenu(s, true);
 }
 
 void cancelSolve(Session& s) {
     if (!s.solver) return;
-    if (s.solver->running()) s.solver->cancel(true);
+    bool saved = s.cancelSaved;
+    s.cancelSaved = false;
+    if (s.solver->running()) {
+        saved = s.solver->saveProgress();
+        s.solver->cancel(true);
+    }
     collectSolver(s, false);
-    s.lastSolverStatus = "Solver cancelled - progress saved";
+    s.lastSolverStatus = saved && s.progress ? "Solver cancelled - progress saved" : "Solver cancelled";
+    chartChanged(s);
+    refreshMenu(s);
 }
 
 void deleteSavedChart(Session& s) {

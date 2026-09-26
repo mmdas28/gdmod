@@ -79,18 +79,16 @@ Result<> writeAtomic(std::filesystem::path const& path, std::string_view data) {
         std::filesystem::remove(tmp, ec);
         return Err(res.unwrapErr());
     }
-    std::filesystem::rename(tmp, path, ec);
-    if (ec) {
-        std::error_code ec2;
-        std::filesystem::remove(path, ec2);
+    constexpr int kAttempts = 5;
+    for (int attempt = 0; attempt < kAttempts; attempt++) {
+        if (attempt > 0) std::this_thread::sleep_for(std::chrono::milliseconds(10 + 10 * attempt));
         ec.clear();
         std::filesystem::rename(tmp, path, ec);
-        if (ec) {
-            std::filesystem::remove(tmp, ec2);
-            return Err(fmt::format("Unable to replace {}: {}", utils::string::pathToString(path.filename()), ec.message()));
-        }
+        if (!ec) return Ok();
     }
-    return Ok();
+    std::error_code ec2;
+    if (std::filesystem::is_regular_file(path, ec2)) std::filesystem::remove(tmp, ec2);
+    return Err(fmt::format("Unable to replace {}: {}", utils::string::pathToString(path.filename()), ec.message()));
 }
 
 struct ProgressState {
@@ -115,6 +113,34 @@ std::shared_ptr<std::string const> pendingBlob(std::string const& key) {
     auto it = st.pending.find(key);
     if (it == st.pending.end()) return nullptr;
     return it->second.blob;
+}
+
+struct OldLocalFolders {
+    std::mutex mutex;
+    std::unordered_map<std::string, std::string> folders;
+};
+
+OldLocalFolders& oldLocalFolders() {
+    static auto* state = new OldLocalFolders();
+    return *state;
+}
+
+std::string oldLocalKey(LevelRef const& ref) {
+    return fmt::format("{}#{:016x}", ref.key(), ref.levelHash);
+}
+
+void rememberOldLocalFolder(LevelRef const& ref, std::string folder) {
+    auto& st = oldLocalFolders();
+    std::lock_guard lock(st.mutex);
+    st.folders[oldLocalKey(ref)] = std::move(folder);
+}
+
+std::optional<std::filesystem::path> oldLocalChartFile(LevelRef const& ref) {
+    auto& st = oldLocalFolders();
+    std::lock_guard lock(st.mutex);
+    auto it = st.folders.find(oldLocalKey(ref));
+    if (it == st.folders.end() || it->second == ref.folder) return std::nullopt;
+    return Mod::get()->getSaveDir() / "levels" / it->second / (ref.variant + ".rpchart");
 }
 
 float clampPercent(double v, float lo, float fallback) {
@@ -157,14 +183,19 @@ LevelRef makeLevelRef(PlayLayer* layer) {
     }
     ref.levelHash = contentHash;
 
-    if (ref.levelID > 0) {
+    std::string oldLocalFolder;
+    if (level && level->m_levelType == GJLevelType::Main && ref.levelID > 0) {
+        ref.folder = fmt::format("main-{}", ref.levelID);
+    }
+    else if (ref.levelID > 0) {
         ref.folder = std::to_string(ref.levelID);
     }
     else {
+        ref.folder = fmt::format("local-{:016x}", fnv1a(levelName));
         uint64_t local = fnv1a(levelName);
         local = fnv1a("\n", local);
         local = fnv1a(levelString, local);
-        ref.folder = fmt::format("local-{:016x}", local);
+        oldLocalFolder = fmt::format("local-{:016x}", local);
     }
 
     ref.twoPlayer = layer->m_levelSettings && layer->m_levelSettings->m_twoPlayerMode;
@@ -187,6 +218,7 @@ LevelRef makeLevelRef(PlayLayer* layer) {
     if (ref.twoPlayer) ref.variant += flip ? "-flip" : "-noflip";
 
     ref.legacyKey = fmt::format("{}_{:016x}", ref.levelID, legacy);
+    if (!oldLocalFolder.empty()) rememberOldLocalFolder(ref, std::move(oldLocalFolder));
     return ref;
 }
 
@@ -204,25 +236,35 @@ static void fillInfoFromRef(Chart& chart, LevelRef const& ref) {
     if (chart.info.savedAt == 0) chart.info.savedAt = nowSeconds();
 }
 
-std::optional<Chart> loadChart(LevelRef const& ref) {
-    auto path = chartFile(ref);
+static std::optional<Chart> readChartFile(LevelRef const& ref, std::filesystem::path const& path) {
     std::error_code ec;
-    if (std::filesystem::exists(path, ec)) {
-        if (auto text = readFileCapped(path, kMaxChartFileSize)) {
-            if (auto chart = Chart::deserialize(*text)) {
-                chart->key = ref.key();
-                if (chart->info.variant.empty()) chart->info.variant = ref.variant;
-                if (chart->info.levelID == 0) chart->info.levelID = ref.levelID;
-                if (chart->info.levelName.empty()) chart->info.levelName = ref.levelName;
-                return chart;
-            }
+    if (!std::filesystem::exists(path, ec)) return std::nullopt;
+    if (auto text = readFileCapped(path, kMaxChartFileSize)) {
+        if (auto chart = Chart::deserialize(*text)) {
+            chart->key = ref.key();
+            if (chart->info.variant.empty()) chart->info.variant = ref.variant;
+            if (chart->info.levelID == 0) chart->info.levelID = ref.levelID;
+            if (chart->info.levelName.empty()) chart->info.levelName = ref.levelName;
+            return chart;
         }
-        log::warn("Could not read saved chart {}", utils::string::pathToString(path));
+    }
+    log::warn("Could not read saved chart {}", utils::string::pathToString(path));
+    return std::nullopt;
+}
+
+std::optional<Chart> loadChart(LevelRef const& ref) {
+    if (auto chart = readChartFile(ref, chartFile(ref))) return chart;
+
+    if (auto old = oldLocalChartFile(ref)) {
+        if (auto chart = readChartFile(ref, *old)) {
+            saveChart(ref, *chart);
+            return chart;
+        }
     }
 
     if (ref.legacyKey.empty()) return std::nullopt;
     auto legacy = legacyChartFile(ref);
-    ec.clear();
+    std::error_code ec;
     if (!std::filesystem::exists(legacy, ec)) return std::nullopt;
     auto text = readFileCapped(legacy, kMaxChartFileSize);
     if (!text) return std::nullopt;
@@ -258,6 +300,10 @@ bool saveChart(LevelRef const& ref, Chart const& chart) {
 void deleteChart(LevelRef const& ref) {
     std::error_code ec;
     std::filesystem::remove(chartFile(ref), ec);
+    if (auto old = oldLocalChartFile(ref)) {
+        ec.clear();
+        std::filesystem::remove(*old, ec);
+    }
     if (!ref.legacyKey.empty()) {
         ec.clear();
         std::filesystem::remove(legacyChartFile(ref), ec);

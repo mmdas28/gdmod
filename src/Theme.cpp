@@ -30,7 +30,7 @@ ThemePreset presetFor(std::string const& name) {
     if (name == "Neon") return {rgb(8, 6, 20, 0.55f), rgb(0, 255, 200), rgb(255, 60, 220), rgb(130, 170, 255), GlowLevel::Strong, false};
     if (name == "Pastel") return {rgb(40, 36, 52, 0.5f), rgb(150, 220, 255), rgb(255, 180, 210), rgb(255, 240, 200), GlowLevel::Soft, false};
     if (name == "Mono") return {rgb(0, 0, 0, 0.5f), rgb(255, 255, 255), rgb(170, 170, 170), rgb(255, 255, 255), GlowLevel::Soft, false};
-    if (name == "Classic") return {rgb(5, 5, 13, 0.72f), rgb(60, 220, 90), rgb(60, 220, 90), rgb(30, 150, 255), GlowLevel::None, true};
+    if (name == "Classic") return {rgb(5, 5, 13, 0.72f), rgb(60, 220, 90), rgb(60, 220, 90), rgb(30, 150, 255), GlowLevel::Soft, true};
     return {rgb(16, 18, 28, 0.62f), rgb(90, 200, 255), rgb(255, 120, 200), rgb(240, 244, 255), GlowLevel::Soft, false};
 }
 
@@ -103,8 +103,6 @@ OverlayStyle loadOverlayStyle() {
 
     style.glow = setting<bool>("glow") ? preset.glow : GlowLevel::None;
     if (preset.classic) {
-        style.shape = NoteShape::Square;
-        style.glow = GlowLevel::None;
         style.rounded = false;
         style.borderColor = {1.f, 1.f, 1.f, 0.8f};
         style.separatorColor = {1.f, 1.f, 1.f, 0.55f};

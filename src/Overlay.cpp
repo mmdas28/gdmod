@@ -88,6 +88,27 @@ double judgeWeight(int judge) {
     return weights[std::clamp(judge, 0, 6)];
 }
 
+std::string percentLabel(float value) {
+    if (!std::isfinite(value)) value = 0.f;
+    value = std::clamp(value, 0.f, 100.f);
+    if (std::fabs(value - std::round(value)) < 0.05f) return fmt::format("{:.0f}", value);
+    return fmt::format("{:.1f}", value);
+}
+
+CCSize labelSize(CCLabelBMFont* label) {
+    if (!label) return {0.f, 0.f};
+    auto size = label->getContentSize();
+    float scale = label->getScale();
+    return {size.width * scale, size.height * scale};
+}
+
+float shiftInto(float lo, float hi, float min, float max) {
+    if (hi - lo >= max - min) return (min + max) / 2.f - (lo + hi) / 2.f;
+    if (lo < min) return min - lo;
+    if (hi > max) return max - hi;
+    return 0.f;
+}
+
 }
 
 CCPoint RhythmOverlay::Geometry::at(float u, float v) const {
@@ -142,6 +163,7 @@ bool RhythmOverlay::init() {
     makeText(m_percentCaption, "chatFont.fnt", "solver-percent-caption"_spr, 6);
     makeText(m_detail, "chatFont.fnt", "solver-detail"_spr, 6);
     makeText(m_note, "chatFont.fnt", "solver-note"_spr, 6);
+    makeText(m_saveHint, "chatFont.fnt", "solver-save-hint"_spr, 6);
     for (int i = 0; i < kMaxSteps; i++) {
         makeText(m_steps[i], "chatFont.fnt", nodeID(fmt::format("solver-step-{}", i + 1)), 6);
     }
@@ -157,6 +179,11 @@ bool RhythmOverlay::init() {
     m_panelMenu->setPosition({0.f, 0.f});
     m_panelMenu->setVisible(false);
     this->addChild(m_panelMenu, 7);
+
+    if (auto probe = CCLabelBMFont::create("0", "bigFont.fnt")) {
+        float height = probe->getContentSize().height;
+        if (std::isfinite(height) && height > 1.f) m_bigLineHeight = height;
+    }
 
     refreshStyle();
     return true;
@@ -232,7 +259,7 @@ void RhythmOverlay::hideAllText() {
             if (slot->label) slot->label->setVisible(false);
         }
     }
-    for (auto slot : {&m_comboText, &m_accuracyText, &m_hint, &m_title, &m_elapsed, &m_percent, &m_percentCaption, &m_detail, &m_note}) {
+    for (auto slot : {&m_comboText, &m_accuracyText, &m_hint, &m_title, &m_elapsed, &m_percent, &m_percentCaption, &m_detail, &m_note, &m_saveHint}) {
         if (slot->label) slot->label->setVisible(false);
     }
     for (auto& slot : m_steps) {
@@ -377,7 +404,7 @@ void RhythmOverlay::visit() {
         return;
     }
 
-    bool shown = m_style.show && !paused && !s->menuOpen && !layer->m_hasCompletedLevel;
+    bool shown = m_style.show && !s->chartHidden && !paused && !s->menuOpen && !layer->m_hasCompletedLevel;
 
     if (!s->chart) {
         m_judgeActive = false;
@@ -411,6 +438,7 @@ void RhythmOverlay::visit() {
 
     double now = gameTime + m_style.visualOffset;
     int laneCount = (chart.twoPlayer || m_style.alwaysShowP2) ? 2 : 1;
+    computeGeometry(laneCount);
     bool idle = m_style.idleFade && idleAt(chart, now, laneCount);
     if (m_snapFade) {
         m_rangeMix = rangeVisible ? 1.f : 0.f;
@@ -435,14 +463,16 @@ float RhythmOverlay::fadeAlpha() const {
 }
 
 bool RhythmOverlay::idleAt(Chart const& chart, double now, int laneCount) const {
-    double ahead = now + m_style.idleSeconds;
+    double lead = static_cast<double>(std::max(0.f, m_geo.length - m_geo.hit)) / std::max(1.f, m_style.scrollSpeed);
+    double ahead = now + lead + kIdleFadeSeconds;
+    double since = now - m_style.idleSeconds;
     for (int lane = 0; lane < laneCount && lane < kLaneCount; lane++) {
+        if (m_activeHold[lane] >= 0) return false;
         auto const& notes = chart.lanes[lane];
-        auto it = std::lower_bound(notes.begin(), notes.end(), now, [](Note const& n, double t) {
+        auto it = std::lower_bound(notes.begin(), notes.end(), since, [](Note const& n, double t) {
             return n.endTime < t;
         });
         if (it != notes.end() && it->startTime <= ahead) return false;
-        if (m_activeHold[lane] >= 0) return false;
     }
     return true;
 }
@@ -527,11 +557,29 @@ void RhythmOverlay::drawSolverPanel(SolverView const& view) {
     capsule({markX, barY - 7.f}, {markX, barY + 7.f}, 0.9f, {1.f, 1.f, 1.f, 0.85f});
 
     showText(m_detail, view.detail, {left + pad, top - 138.f}, 0.55f, {0.f, 0.5f}, text, 0.92f, inner);
-    std::string note = view.note.empty() ? std::string("Progress is saved if you cancel, so you can resume later.") : view.note;
-    showText(m_note, note, {left + pad, top - 154.f}, 0.5f, {0.f, 0.5f}, dim, 1.f, inner);
+    showText(m_note, view.note, {left + pad, top - 154.f}, 0.5f, {0.f, 0.5f}, dim, 1.f, inner);
 
     m_panelMenu->setVisible(true);
     if (m_cancelButton) m_cancelButton->setPosition({cx, bottom + 22.f});
+
+    bool savesProgress = false;
+    switch (view.phase) {
+        case Phase::Search:
+        case Phase::Verify:
+        case Phase::Optimize:
+        case Phase::Refine:
+        case Phase::FinalVerify: savesProgress = true; break;
+        default: break;
+    }
+    if (view.title.starts_with("Checking imported")) savesProgress = false;
+    if (savesProgress) {
+        float buttonHalf = 0.f;
+        if (m_cancelButton) buttonHalf = m_cancelButton->getContentSize().width / 2.f;
+        float room = cx - buttonHalf - 10.f - (left + pad);
+        if (room >= 40.f) {
+            showText(m_saveHint, "Progress is saved while searching", {left + pad, bottom + 22.f}, 0.45f, {0.f, 0.5f}, dim, 0.9f, room);
+        }
+    }
 }
 
 void RhythmOverlay::drawEmptyPill(std::string const& message) {
@@ -600,6 +648,7 @@ void RhythmOverlay::drawChart(Session& session, Chart const& chart, double now, 
     for (int lane = 0; lane < laneCount; lane++) {
         float v = g.laneCenter(lane);
         ccColor4F color = m_style.laneNoteColor(lane);
+        float laneAlpha = noteAlpha * std::clamp(color.a, 0.f, 1.f);
         auto const& notes = chart.lanes[lane];
         auto const& states = m_states[lane];
         bool statesOk = states.size() == notes.size();
@@ -613,11 +662,11 @@ void RhythmOverlay::drawChart(Session& session, Chart const& chart, double now, 
         if (m_style.receptors) {
             bool held = m_userHeld[lane];
             if (held || consuming) {
-                if (glowA > 0.f) drawHead(g.hit, v, withAlpha(color, noteAlpha * glowA * (consuming ? 1.6f : 1.f)), glowGrow * 1.6f, false);
-                drawHead(g.hit, v, withAlpha(mixWhite(color, 0.15f), noteAlpha * 0.62f), 0.f, true);
+                if (glowA > 0.f) drawHead(g.hit, v, withAlpha(color, laneAlpha * glowA * (consuming ? 1.6f : 1.f)), glowGrow * 1.6f, false);
+                drawHead(g.hit, v, withAlpha(mixWhite(color, 0.15f), laneAlpha * 0.62f), 0.f, true);
             }
             else {
-                drawHead(g.hit, v, withAlpha(m_style.lineColor, alpha * 0.2f), 0.f, false);
+                drawHead(g.hit, v, scaled(m_style.lineColor, alpha * 0.2f), 0.f, false);
             }
         }
 
@@ -631,7 +680,7 @@ void RhythmOverlay::drawChart(Session& session, Chart const& chart, double now, 
             bool isHold = it->endTime - it->startTime >= kHoldSeconds;
             float us = g.hit + static_cast<float>((it->startTime - now) * speed);
             float ue = g.hit + static_cast<float>((it->endTime - now) * speed);
-            float a = noteAlpha;
+            float a = laneAlpha;
             float bodyFrom = us;
             bool head = true;
             bool bright = false;
@@ -694,7 +743,7 @@ void RhythmOverlay::drawChart(Session& session, Chart const& chart, double now, 
             auto pos = g.at(u, v);
             slot.label->setPosition(pos);
             if (m_style.chipColor.a > 0.f) {
-                fillRoundRect(pos.x - cw / 2.f, pos.y - ch / 2.f, pos.x + cw / 2.f, pos.y + ch / 2.f, ch / 2.f, scaled(m_style.chipColor, alpha), withAlpha(color, 0.18f * alpha));
+                fillRoundRect(pos.x - cw / 2.f, pos.y - ch / 2.f, pos.x + cw / 2.f, pos.y + ch / 2.f, ch / 2.f, scaled(m_style.chipColor, alpha), withAlpha(color, 0.18f * alpha * std::clamp(color.a, 0.f, 1.f)));
             }
         }
     }
@@ -704,25 +753,45 @@ void RhythmOverlay::drawChart(Session& session, Chart const& chart, double now, 
 
     if (!chart.complete) {
         auto win = CCDirector::get()->getWinSize();
-        std::string text = fmt::format("Chart ends at {:.0f}%", chart.reachedPercent);
+        float reached = std::isfinite(chart.reachedPercent) ? std::clamp(chart.reachedPercent, 0.f, 100.f) : 0.f;
+        std::string text = chart.targetReached()
+            ? fmt::format("Chart ends at {}%", percentLabel(chart.info.targetPercent))
+            : fmt::format("Chart ends at {:.0f}%", std::floor(reached));
         if (!session.lastSolverStatus.empty() && !chart.targetReached()) text += " - " + session.lastSolverStatus;
-        CCPoint pos;
-        CCPoint anchor;
-        float maxW;
+        float base = std::clamp(g.laneSize / 80.f, 0.24f, 0.4f);
+        float comboHalf = m_bigLineHeight * base * 1.22f / 2.f;
+        float accuracyHalf = m_bigLineHeight * base * 0.78f / 2.f;
         if (!g.vertical) {
             bool below = (g.y0 + g.y1) / 2.f > win.height / 2.f;
-            pos = CCPoint((g.x0 + g.x1) / 2.f, below ? g.y0 - 9.f : g.y1 + 9.f);
-            anchor = CCPoint(0.5f, 0.5f);
-            maxW = L * 0.5f;
+            float maxW = std::max(40.f, std::min(L, win.width - 12.f));
+            showText(m_hint, text, {(g.x0 + g.x1) / 2.f, 0.f}, 0.45f, {0.5f, 0.5f}, {210, 214, 228}, 0.8f * alpha, maxW);
+            if (m_hint.label->isVisible()) {
+                float half = labelSize(m_hint.label).height / 2.f;
+                float row = 10.f + std::max(comboHalf, accuracyHalf) + half + 2.f;
+                float y = below ? g.y0 - row : g.y1 + row;
+                if (y - half < 2.f || y + half > win.height - 2.f) y = below ? g.y1 + 9.f : g.y0 - 9.f;
+                y = std::clamp(y, half + 2.f, std::max(half + 2.f, win.height - half - 2.f));
+                m_hint.label->setPositionY(y);
+            }
         }
         else {
             bool right = (g.x0 + g.x1) / 2.f < win.width / 2.f;
-            pos = g.at(L - 8.f, 0.f);
-            pos.x = right ? g.x1 + 8.f : g.x0 - 8.f;
-            anchor = CCPoint(right ? 0.f : 1.f, 0.5f);
-            maxW = std::max(60.f, right ? win.width - pos.x - 6.f : pos.x - 6.f);
+            float x = right ? g.x1 + 8.f : g.x0 - 8.f;
+            float maxW = std::max(60.f, right ? win.width - x - 6.f : x - 6.f);
+            showText(m_hint, text, {x, 0.f}, 0.45f, {right ? 0.f : 1.f, 0.5f}, {210, 214, 228}, 0.8f * alpha, maxW);
+            if (m_hint.label->isVisible()) {
+                float half = labelSize(m_hint.label).height / 2.f;
+                float accuracyU = g.hit + 10.f + std::max(14.f, 34.f * base);
+                float u = std::max(L - 8.f, accuracyU + accuracyHalf + half + 3.f);
+                float y = g.at(u, 0.f).y;
+                if (y - half < 2.f || y + half > win.height - 2.f) {
+                    u = g.hit + 10.f - comboHalf - half - 3.f;
+                    y = g.at(u, 0.f).y;
+                }
+                y = std::clamp(y, half + 2.f, std::max(half + 2.f, win.height - half - 2.f));
+                m_hint.label->setPositionY(y);
+            }
         }
-        showText(m_hint, text, pos, 0.45f, anchor, {210, 214, 228}, 0.8f * alpha, maxW);
     }
 }
 
@@ -773,7 +842,9 @@ void RhythmOverlay::drawStats(Chart const&, float alpha) {
 void RhythmOverlay::drawPopups(float alpha) {
     if (!m_style.judgements) return;
     auto const& g = m_geo;
+    auto win = CCDirector::get()->getWinSize();
     double clock = clockSeconds();
+    ccColor3B subColor = {225, 230, 242};
     for (int lane = 0; lane < kLaneCount; lane++) {
         auto const& popup = m_popups[lane];
         if (popup.shownAt < 0.0) continue;
@@ -787,25 +858,81 @@ void RhythmOverlay::drawPopups(float alpha) {
         float fade = 1.f - smooth((t - 0.34f) / static_cast<float>(kPopupSeconds - 0.34));
         float opacity = fade * std::max(alpha, 0.6f);
         float base = std::clamp(g.laneSize / 90.f, 0.16f, 0.42f);
+        auto& word = m_judgeWords[lane];
+        auto& sub = m_judgeSubs[lane];
 
         if (!g.vertical) {
-            float u = g.hit + std::max(10.f, g.laneSize * 0.45f);
-            auto pos = g.at(u, v);
-            float ax = g.reverse ? 1.f : 0.f;
-            showText(m_judgeWords[lane], popup.word, pos, base * scaleMul, {ax, 0.5f}, popup.color, opacity, g.length * 0.4f);
-            if (!popup.sub.empty() && m_judgeWords[lane].label->isVisible()) {
-                float w = m_judgeWords[lane].label->getContentSize().width * m_judgeWords[lane].label->getScale();
-                CCPoint subPos = {pos.x + (g.reverse ? -(w + 5.f) : w + 5.f), pos.y};
-                showText(m_judgeSubs[lane], popup.sub, subPos, std::clamp(g.laneSize / 50.f, 0.35f, 0.55f), {ax, 0.5f}, {225, 230, 242}, opacity * 0.9f, g.length * 0.3f);
+            showText(word, popup.word, {0.f, 0.f}, base * scaleMul, {0.5f, 0.5f}, popup.color, opacity, g.length * 0.4f);
+            if (!word.label->isVisible()) continue;
+            auto wordSize = labelSize(word.label);
+            CCSize subSize = {0.f, 0.f};
+            if (!popup.sub.empty()) {
+                showText(sub, popup.sub, {0.f, 0.f}, std::clamp(g.laneSize / 50.f, 0.35f, 0.55f), {0.5f, 0.5f}, subColor, opacity * 0.9f, g.length * 0.3f);
+                if (sub.label->isVisible()) subSize = labelSize(sub.label);
             }
+            bool hasSub = subSize.width > 0.f;
+            float extent = wordSize.width + (hasSub ? 5.f + subSize.width : 0.f);
+            float popW = std::min(word.label->getContentSize().width * base * 1.3f, g.length * 0.4f);
+            float extentMax = std::max(extent, popW + (hasSub ? 5.f + subSize.width : 0.f));
+            float offset = std::max(10.f, g.laneSize * 0.45f);
+            float farRoom = g.length - 2.f - (g.hit + offset);
+            float nearRoom = g.hit - offset - 2.f;
+            bool nearSide = extentMax > farRoom && nearRoom > farRoom;
+            float start = nearSide ? g.hit - offset - extent : g.hit + offset;
+            start += shiftInto(start, start + extent, 2.f, g.length - 2.f);
+            float wordU = nearSide ? start + extent - wordSize.width / 2.f : start + wordSize.width / 2.f;
+            float subU = nearSide ? start + subSize.width / 2.f : start + extent - subSize.width / 2.f;
+            auto wordPos = g.at(wordU, v);
+            auto subPos = g.at(subU, v);
+            auto spanA = g.at(start, v);
+            auto spanB = g.at(start + extent, v);
+            float height = std::max(wordSize.height, subSize.height);
+            float dx = shiftInto(std::min(spanA.x, spanB.x), std::max(spanA.x, spanB.x), 2.f, win.width - 2.f);
+            float dy = shiftInto(wordPos.y - height / 2.f, wordPos.y + height / 2.f, 2.f, win.height - 2.f);
+            word.label->setPosition({wordPos.x + dx, wordPos.y + dy});
+            if (hasSub) sub.label->setPosition({subPos.x + dx, subPos.y + dy});
         }
         else {
-            float maxW = g.laneCount > 1 ? g.laneSize * 1.5f : std::max(g.laneSize * 2.5f, 70.f);
-            float u = g.hit + g.laneSize * 0.9f + 12.f;
-            showText(m_judgeWords[lane], popup.word, g.at(u, v), base * scaleMul, {0.5f, 0.5f}, popup.color, opacity, maxW * scaleMul);
+            float crossLo = std::max(2.f, g.x0 + 1.f);
+            float crossHi = std::min(win.width - 2.f, g.x1 - 1.f);
+            float maxW = std::max(4.f, g.laneSize - 2.f);
+            showText(word, popup.word, {0.f, 0.f}, base * scaleMul, {0.5f, 0.5f}, popup.color, opacity, maxW);
+            if (!word.label->isVisible()) continue;
+            auto wordSize = labelSize(word.label);
+            float contentW = word.label->getContentSize().width;
+            float restScale = contentW > 0.f && contentW * base > maxW ? maxW / contentW : base;
+            float restHeight = word.label->getContentSize().height * restScale;
+            CCSize subSize = {0.f, 0.f};
             if (!popup.sub.empty()) {
-                showText(m_judgeSubs[lane], popup.sub, g.at(u - 11.f, v), std::clamp(g.laneSize / 60.f, 0.3f, 0.5f), {0.5f, 0.5f}, {225, 230, 242}, opacity * 0.9f, maxW);
+                showText(sub, popup.sub, {0.f, 0.f}, std::clamp(g.laneSize / 60.f, 0.3f, 0.5f), {0.5f, 0.5f}, subColor, opacity * 0.9f, maxW);
+                if (sub.label->isVisible()) subSize = labelSize(sub.label);
             }
+            bool hasSub = subSize.height > 0.f;
+            float gap = std::max(11.f, restHeight * 0.65f + subSize.height / 2.f + 1.f);
+            float awayExtent = wordSize.height / 2.f;
+            float hitExtent = hasSub ? gap + subSize.height / 2.f : wordSize.height / 2.f;
+            float popScale = contentW > 0.f ? std::min(base * 1.3f, maxW / contentW) : base * 1.3f;
+            float awayExtentMax = std::max(awayExtent, word.label->getContentSize().height * popScale / 2.f);
+            float offset = g.laneSize * 0.9f + 12.f;
+            float farRoom = g.length - 2.f - (g.hit + offset + awayExtentMax);
+            float nearRoom = g.hit - offset - awayExtentMax - 2.f;
+            bool nearSide = farRoom < 0.f && nearRoom > farRoom;
+            float wordU = nearSide ? g.hit - offset : g.hit + offset;
+            float subU = nearSide ? wordU + gap : wordU - gap;
+            float lo = nearSide ? wordU - awayExtent : wordU - hitExtent;
+            float hi = nearSide ? wordU + hitExtent : wordU + awayExtent;
+            float du = shiftInto(lo, hi, 2.f, g.length - 2.f);
+            wordU += du;
+            subU += du;
+            auto wordPos = g.at(wordU, v);
+            auto subPos = g.at(subU, v);
+            float halfW = std::max(wordSize.width, subSize.width) / 2.f;
+            float dx = shiftInto(wordPos.x - halfW, wordPos.x + halfW, crossLo, std::max(crossLo, crossHi));
+            auto spanA = g.at(lo + du, v);
+            auto spanB = g.at(hi + du, v);
+            float dy = shiftInto(std::min(spanA.y, spanB.y), std::max(spanA.y, spanB.y), 2.f, win.height - 2.f);
+            word.label->setPosition({wordPos.x + dx, wordPos.y + dy});
+            if (hasSub) sub.label->setPosition({subPos.x + dx, subPos.y + dy});
         }
     }
 }

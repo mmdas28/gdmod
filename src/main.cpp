@@ -63,6 +63,10 @@ class $modify(RPPlayLayer, PlayLayer) {
                 solver->saveProgress();
                 solver->cancel(false);
             }
+            if (s->audioHeld) {
+                s->audioHeld = false;
+                this->resumeAudio();
+            }
         }
         PlayLayer::onExit();
     }
@@ -237,7 +241,7 @@ class $modify(RPPauseLayer, PauseLayer) {
         mainButton->setID(solving ? "cancel-solve-button"_spr : "menu-button"_spr);
         menu->addChild(mainButton);
 
-        bool show = Mod::get()->getSettingValue<bool>("show-overlay");
+        bool show = Mod::get()->getSettingValue<bool>("show-overlay") && !s->chartHidden;
         auto chartSprite = ButtonSprite::create(show ? "Chart: ON" : "Chart: OFF", "goldFont.fnt", "GJ_button_04.png", 0.8f);
         chartSprite->setScale(0.6f);
         auto chartButton = CCMenuItemSpriteExtra::create(chartSprite, this, menu_selector(RPPauseLayer::onRhythmToggle));
@@ -254,6 +258,7 @@ class $modify(RPPauseLayer, PauseLayer) {
         if (!s || !s->layer) return;
         auto layer = s->layer;
         if (auto solver = runningSolver(s)) {
+            s->cancelSaved = solver->saveProgress();
             solver->cancel(false);
             rp::cancelSolve(*s);
             PauseLayer::onResume(nullptr);
@@ -265,10 +270,16 @@ class $modify(RPPauseLayer, PauseLayer) {
     }
 
     void onRhythmToggle(CCObject* sender) {
-        bool show = !Mod::get()->getSettingValue<bool>("show-overlay");
-        Mod::get()->setSettingValue<bool>("show-overlay", show);
-        if (auto s = rp::session()) {
-            if (show && s->overlay) s->overlay->setVisible(true);
+        auto s = rp::session();
+        bool setting = Mod::get()->getSettingValue<bool>("show-overlay");
+        bool show = !(setting && !(s && s->chartHidden));
+        if (show) {
+            if (s) s->chartHidden = false;
+            if (!setting) Mod::get()->setSettingValue<bool>("show-overlay", true);
+            if (s && s->overlay) s->overlay->setVisible(true);
+        }
+        else {
+            Mod::get()->setSettingValue<bool>("show-overlay", false);
         }
         if (auto item = typeinfo_cast<CCMenuItemSpriteExtra*>(sender)) {
             if (auto sprite = typeinfo_cast<ButtonSprite*>(item->getNormalImage())) {

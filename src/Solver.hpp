@@ -77,6 +77,8 @@ struct SearchNode {
     uint8_t tried = 0;
     uint8_t def = 0;
     uint8_t flips = 0;
+    bool seeded = false;
+    bool recompute = false;
 };
 
 struct StatSnapshot {
@@ -188,8 +190,10 @@ private:
     bool m_replayFallbackUsed = false;
     bool m_replayFromRepair = false;
     bool m_importChecking = false;
+    bool m_fromImport = false;
+    bool m_bestFromImport = false;
     bool m_resumed = false;
-    bool m_saveOnFailure = true;
+    bool m_exhausted = false;
 
     int m_stepsPerUpdate = 4;
     int m_inputResolution = 1;
@@ -210,7 +214,11 @@ private:
     std::vector<LadderStep> m_ladder;
     int m_level = 0;
     int m_escalatedAt = 0;
+    int m_levelBase = 0;
     int m_finestTier = -1;
+    int m_preloadEnd = 0;
+    bool m_preloadTiming = false;
+    std::string m_preloadSignature;
 
     int m_searchCpInterval = 8;
     int m_denseWindow = 1440;
@@ -280,12 +288,17 @@ private:
     int m_optEdits = 0;
     size_t m_optPosition = 0;
 
-    Clock::time_point m_startTime;
-    Clock::time_point m_refineDeadline;
-    Clock::time_point m_optDeadline;
+    Clock::time_point m_frameStart;
+    Clock::time_point m_lastFrameEnd;
     Clock::time_point m_lastLog;
     Clock::time_point m_lastSave;
     Clock::time_point m_speedTime;
+    bool m_inFrame = false;
+    bool m_frameClockValid = false;
+    double m_activeSeconds = 0.0;
+    double m_optDeadline = 0.0;
+    double m_refineDeadline = 0.0;
+    double m_polishDeadline = 0.0;
     double m_elapsedOffset = 0.0;
     double m_frozenElapsed = -1.0;
     double m_recentSpeed = 0.0;
@@ -333,8 +346,11 @@ private:
     uint8_t laneModesAt(int tick) const;
     void recordLaneModes(int tick, uint8_t modes);
     void policyAt(int tick, uint8_t modes, uint8_t& def, uint8_t& flips) const;
-    uint8_t seedFlips(int tick) const;
+    void settleNode(int tick, uint8_t modes);
+    bool changeBreaksTiming(int tick, uint8_t modes, uint8_t held) const;
     void seedPath(std::vector<uint8_t> const& seq, int length);
+    void cutPreload(int tick);
+    bool importRun() const;
     bool fastModeNow() const;
     void setLayerHidden(bool hidden);
     void updateCheckpointInterval();
@@ -364,6 +380,7 @@ private:
     void handleSearchDeath();
     void dfsBacktrack(int failNode);
     bool trySearchFallback();
+    void stopWithBest();
     void onSearchSuccess();
     void beginVerify(std::vector<uint8_t> seq, Phase phase);
     void onVerifySuccess();

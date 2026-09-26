@@ -20,10 +20,12 @@ constexpr int kRepairRewindTicks = 120;
 constexpr int kFastTestTicks = 480;
 constexpr int kEscalateTicks = 240 * 5;
 constexpr int kDeescalateTicks = 240 * 10;
-constexpr int kJoinGapTicks = 60;
+constexpr int kJoinGapTicks = 150;
 constexpr int kExactTier = 2;
 constexpr auto kAutoSaveInterval = std::chrono::seconds(45);
 constexpr auto kLogInterval = std::chrono::seconds(10);
+constexpr double kMaxFrameGapSeconds = 0.1;
+constexpr double kMaxGameFrameMs = 100.0;
 
 constexpr uint8_t kFamShip = 1;
 constexpr uint8_t kFamWave = 2;
@@ -206,7 +208,9 @@ std::string Solver::settingsSignature() const {
 }
 
 double Solver::runSeconds() const {
-    return std::chrono::duration<double>(Clock::now() - m_startTime).count();
+    double seconds = m_activeSeconds;
+    if (m_inFrame) seconds += std::chrono::duration<double>(Clock::now() - m_frameStart).count();
+    return seconds;
 }
 
 double Solver::elapsedSeconds() const {
@@ -272,6 +276,8 @@ bool Solver::canEscalate() const {
 void Solver::escalate() {
     m_level = std::min(m_level + 1, static_cast<int>(m_ladder.size()) - 1);
     m_escalatedAt = m_maxTick;
+    m_levelBase = static_cast<int>(m_path.size());
+    m_preloadEnd = 0;
     m_dead.clear();
     for (int t = 0; t < static_cast<int>(m_path.size()); t++) {
         auto& node = m_path[t];
@@ -279,6 +285,10 @@ void Solver::escalate() {
         node.tried = static_cast<uint8_t>(1u << (node.held & 3));
         uint8_t modes = laneModesAt(t);
         if (modes & kModesUnknown) continue;
+        if (node.recompute) {
+            settleNode(t, modes);
+            continue;
+        }
         uint8_t def = 0;
         uint8_t flips = 0;
         policyAt(t, modes, def, flips);
@@ -296,6 +306,8 @@ void Solver::escalate() {
 
 void Solver::deescalate() {
     m_level = 0;
+    m_levelBase = 0;
+    m_preloadEnd = 0;
     m_dead.clear();
     for (auto& node : m_path) node.hash = 0;
     log::info("Solver: passed the hard section (tick {}), back to {} precision", m_maxTick, tierName(currentStep().tier));
@@ -418,11 +430,23 @@ void Solver::policyAt(int tick, uint8_t modes, uint8_t& def, uint8_t& flips) con
     }
 }
 
-uint8_t Solver::seedFlips(int tick) const {
-    if (m_inputResolution > 1 && tick % m_inputResolution != 0) return 0;
-    uint8_t modes = laneModesAt(tick);
-    if (modes & kModesUnknown) return m_twoPlayer ? 3 : 1;
-    return laneActive(modes, 1) ? 3 : 1;
+void Solver::settleNode(int tick, uint8_t modes) {
+    auto& node = m_path[tick];
+    policyAt(tick, modes, node.def, node.flips);
+    node.seeded = ((node.held ^ node.def) & ~node.flips & 3) != 0;
+    node.recompute = false;
+}
+
+bool Solver::changeBreaksTiming(int tick, uint8_t modes, uint8_t held) const {
+    if (!m_constraintsActive || (modes & kModesUnknown)) return false;
+    uint8_t prev = tick > 0 && tick - 1 < static_cast<int>(m_path.size()) ? m_path[tick - 1].held : 0;
+    for (int lane = 0; lane < kLaneCount; lane++) {
+        uint8_t mask = static_cast<uint8_t>(1u << lane);
+        if (!laneActive(modes, lane) || !((held ^ prev) & mask)) continue;
+        int required = requiredTicks(laneFamily(modes, lane), (prev & mask) != 0);
+        if (required > 1 && sinceChange(tick, lane) < required) return true;
+    }
+    return false;
 }
 
 void Solver::seedPath(std::vector<uint8_t> const& seq, int length) {
@@ -435,14 +459,34 @@ void Solver::seedPath(std::vector<uint8_t> const& seq, int length) {
         node.held = static_cast<uint8_t>(seq[t] & 3);
         node.def = node.held;
         node.tried = static_cast<uint8_t>(1u << node.held);
-        node.flips = seedFlips(t);
+        node.seeded = true;
+        node.recompute = true;
         m_path.push_back(node);
+        uint8_t modes = laneModesAt(t);
+        if (!(modes & kModesUnknown)) settleNode(t, modes);
     }
+}
+
+void Solver::cutPreload(int tick) {
+    log::info("Solver: the saved path is faster than the current timing limits at tick {}, searching on from there", tick);
+    m_path.resize(static_cast<size_t>(tick) + 1);
+    auto& node = m_path[tick];
+    node.held = node.def;
+    node.tried = static_cast<uint8_t>(node.tried | (1u << node.def));
+    node.seeded = false;
+    m_preloadEnd = 0;
+    m_best = heldOf(m_path);
+    m_bestFromImport = m_fromImport;
+    m_maxPercent = cleanPercent(m_layer->getCurrentPercent(), 0.f);
+}
+
+bool Solver::importRun() const {
+    return m_request.kind == SolveKind::CheckImport;
 }
 
 bool Solver::fastModeNow() const {
     if (m_phase == Phase::SelfTest) return m_selfTestStage == 2;
-    if (m_phase == Phase::FinalVerify) return false;
+    if (m_phase == Phase::FinalVerify || m_importChecking) return false;
     return m_fastAllowed;
 }
 
@@ -514,16 +558,19 @@ void Solver::start(SolveRequest request) {
     buildLadder();
     buildObjectIndex();
 
-    m_startTime = Clock::now();
-    m_lastLog = m_startTime;
-    m_lastSave = m_startTime;
-    m_speedTime = m_startTime;
+    auto now = Clock::now();
+    m_lastLog = now;
+    m_lastSave = now;
+    m_speedTime = now;
+    m_inFrame = false;
+    m_frameClockValid = false;
+    m_activeSeconds = 0.0;
     m_elapsedOffset = 0.0;
     m_frozenElapsed = -1.0;
     m_recentSpeed = 0.0;
     m_speedSteps = 0;
     m_lastSaveValid = false;
-    m_saveOnFailure = true;
+    m_exhausted = false;
     m_resumed = false;
     if (m_request.kind == SolveKind::Resume && m_request.progress) {
         if (m_request.progress->levelHash == m_ref.levelHash) {
@@ -567,7 +614,12 @@ void Solver::start(SolveRequest request) {
     m_replayFallbackUsed = false;
     m_replayFromRepair = false;
     m_importChecking = false;
+    m_fromImport = false;
+    m_bestFromImport = false;
     m_escalatedAt = 0;
+    m_levelBase = 0;
+    m_preloadEnd = 0;
+    m_preloadTiming = false;
     m_finestTier = -1;
     m_optEdits = 0;
     m_refineMoved = 0;
@@ -610,8 +662,8 @@ void Solver::cancel(bool resetLevel) {
     }
 }
 
-void Solver::saveProgress() {
-    if (m_inStep) return;
+bool Solver::saveProgress() {
+    if (m_inStep || importRun()) return false;
     bool pathFound = false;
     switch (m_phase) {
         case Phase::Search:
@@ -623,13 +675,13 @@ void Solver::saveProgress() {
             pathFound = true;
             break;
         default:
-            return;
+            return false;
     }
-    if (m_lastSaveValid && m_lastSaveSteps == m_totalSteps && m_lastSavePhase == m_phase) return;
+    if (m_lastSaveValid && m_lastSaveSteps == m_totalSteps && m_lastSavePhase == m_phase) return true;
 
     SolveProgress progress;
     progress.levelHash = m_ref.levelHash;
-    progress.settingsSignature = settingsSignature();
+    progress.settingsSignature = (m_preloadTiming && m_preloadEnd > 0) ? m_preloadSignature : settingsSignature();
     progress.targetPercent = m_targetPercent;
     progress.elapsedSeconds = elapsedSeconds();
     progress.totalSteps = m_totalSteps;
@@ -672,13 +724,29 @@ void Solver::saveProgress() {
         "Solver: progress saved ({}, {} ticks, {:.1f}%, {:.0f}s)",
         pathFound ? "path found" : "searching", progress.held.size(), m_maxPercent, progress.elapsedSeconds
     );
+    return true;
 }
 
 void Solver::runFrame() {
     if (!running()) return;
     setLayerHidden(true);
     auto frameStart = Clock::now();
-    auto budget = std::chrono::duration<double, std::milli>(m_frameBudgetMs);
+    if (m_frameClockValid) {
+        double gap = std::chrono::duration<double>(frameStart - m_lastFrameEnd).count();
+        m_activeSeconds += std::clamp(gap, 0.0, kMaxFrameGapSeconds);
+        if (gap > kMaxFrameGapSeconds) {
+            m_speedTime = frameStart;
+            m_speedSteps = m_totalSteps;
+        }
+    }
+    m_frameStart = frameStart;
+    m_inFrame = true;
+    double budgetMs = m_frameBudgetMs;
+    if (auto director = CCDirector::get()) {
+        double gameMs = director->getAnimationInterval() * 1000.0;
+        if (std::isfinite(gameMs) && gameMs > 0.0) budgetMs = std::max(budgetMs, 0.85 * std::min(gameMs, kMaxGameFrameMs));
+    }
+    auto budget = std::chrono::duration<double, std::milli>(budgetMs);
     while (running()) {
         bool keepGoing = false;
         switch (m_phase) {
@@ -694,6 +762,10 @@ void Solver::runFrame() {
         if (Clock::now() - frameStart >= budget) break;
     }
     auto now = Clock::now();
+    m_activeSeconds += std::chrono::duration<double>(now - frameStart).count();
+    m_inFrame = false;
+    m_lastFrameEnd = now;
+    m_frameClockValid = true;
     updateSpeed(now);
     if (running() && now - m_lastSave >= kAutoSaveInterval) {
         m_lastSave = now;
@@ -725,8 +797,7 @@ bool Solver::simulate() {
         if (++m_stallFrames > 600) {
             m_failReason = "the game stopped advancing";
             log::error("Solver: game is not advancing (tick {})", m_tick);
-            std::vector<uint8_t> best = m_best.size() > m_path.size() ? m_best : heldOf(m_path);
-            finish(false, best, false, false, false);
+            stopWithBest();
         }
         return false;
     }
@@ -950,15 +1021,25 @@ void Solver::beforeStep(bool halfTick) {
             if (t < static_cast<int>(m_path.size())) {
                 uint8_t modes = laneModesNow();
                 recordLaneModes(t, modes);
-                auto& node = m_path[t];
-                if (node.hash == 0) {
-                    node.hash = stateHash(t);
-                    uint8_t def = 0;
-                    uint8_t flips = 0;
-                    policyAt(t, modes, def, flips);
-                    node.flips = static_cast<uint8_t>(node.flips | flips);
+                if (m_path[t].hash == 0) {
+                    m_path[t].hash = stateHash(t);
+                    if (t + 1 > m_maxTick) m_maxTick = t + 1;
+                    if (t < m_preloadEnd) {
+                        m_escalatedAt = std::max(m_escalatedAt, t + 1);
+                        m_levelBase = std::max(m_levelBase, t + 1);
+                    }
+                    if (m_path[t].recompute) {
+                        settleNode(t, modes);
+                        if (m_preloadTiming && t < m_preloadEnd && changeBreaksTiming(t, modes, m_path[t].held)) cutPreload(t);
+                    }
+                    else {
+                        uint8_t def = 0;
+                        uint8_t flips = 0;
+                        policyAt(t, modes, def, flips);
+                        m_path[t].flips = static_cast<uint8_t>(m_path[t].flips | flips);
+                    }
                 }
-                applyHeld(node.held);
+                applyHeld(m_path[t].held);
                 break;
             }
             uint64_t h = stateHash(t);
@@ -1128,6 +1209,7 @@ void Solver::beginAfterSelfTest() {
         m_request.importSeq.clear();
         log::info("Solver: checking {} ticks of imported inputs", seq.size());
         m_importChecking = true;
+        m_fromImport = true;
         m_maxPercent = 0.f;
         beginVerify(std::move(seq), Phase::Verify);
         return;
@@ -1159,8 +1241,9 @@ void Solver::resumeFrom(SolveProgress const& progress) {
     std::vector<uint8_t> best = progress.best;
     for (auto& v : best) v = static_cast<uint8_t>(v & 3);
     float maxPercent = cleanPercent(progress.maxPercent, 0.f);
+    bool checkTiming = !sameSettings && m_constraintsActive && !m_relaxTiming;
 
-    if (progress.pathFound) {
+    if (progress.pathFound && !checkTiming) {
         std::vector<uint8_t> seq = progress.held;
         for (auto& v : seq) v = static_cast<uint8_t>(v & 3);
         if (sameSettings && validLevel) m_level = progress.escalation;
@@ -1179,8 +1262,8 @@ void Solver::resumeFrom(SolveProgress const& progress) {
         m_level = progress.escalation;
         m_finestTier = std::max(m_finestTier, currentStep().tier);
     }
-    bool keepClaims = sameSettings && progress.escalation == m_level && progress.fastAllowed == m_fastAllowed &&
-        progress.replayMode == (m_restoreMode == RestoreMode::Replay);
+    bool keepClaims = !progress.pathFound && sameSettings && progress.escalation == m_level &&
+        progress.fastAllowed == m_fastAllowed && progress.replayMode == (m_restoreMode == RestoreMode::Replay);
 
     size_t count = progress.held.size();
     bool nodeData = progress.tried.size() == count && progress.def.size() == count && progress.flips.size() == count;
@@ -1188,14 +1271,8 @@ void Solver::resumeFrom(SolveProgress const& progress) {
     for (size_t i = 0; i < count; i++) {
         SearchNode node;
         node.held = static_cast<uint8_t>(progress.held[i] & 3);
-        if (nodeData) {
-            node.def = static_cast<uint8_t>(progress.def[i] & 3);
-            node.flips = static_cast<uint8_t>(progress.flips[i] & 3);
-        }
-        else {
-            node.def = node.held;
-            node.flips = seedFlips(static_cast<int>(i));
-        }
+        node.def = node.held;
+        node.recompute = true;
         node.tried = static_cast<uint8_t>(1u << node.held);
         if (keepClaims && nodeData) node.tried = static_cast<uint8_t>(node.tried | (progress.tried[i] & 15));
         m_path.push_back(node);
@@ -1203,8 +1280,9 @@ void Solver::resumeFrom(SolveProgress const& progress) {
     m_laneModes.assign(count, kModesUnknown);
     m_best = best.size() > count ? std::move(best) : heldOf(m_path);
     m_maxPercent = maxPercent;
-    m_maxTick = std::max(std::max(progress.maxTick, 0), static_cast<int>(count));
-    m_escalatedAt = m_maxTick;
+    m_preloadEnd = static_cast<int>(count);
+    m_preloadTiming = checkTiming;
+    m_preloadSignature = progress.settingsSignature;
     size_t deadLoaded = 0;
     if (keepClaims && progress.dead.size() <= kMaxDeadStates) {
         m_dead.reserve(progress.dead.size());
@@ -1212,6 +1290,10 @@ void Solver::resumeFrom(SolveProgress const& progress) {
             if (h != 0) m_dead.insert(h);
         }
         deadLoaded = m_dead.size();
+    }
+    if (progress.pathFound) {
+        log::info("Solver: resuming with a found path ({} ticks) made with other settings, replaying it with the current timing limits", count);
+        return;
     }
     log::info(
         "Solver: resuming the search at {:.1f}% ({} ticks, level {}/{}, {} known dead ends{})",
@@ -1230,8 +1312,13 @@ void Solver::beginSearchFresh() {
     m_maxTick = 0;
     m_maxPercent = 0.f;
     m_replayFromRepair = false;
+    m_fromImport = false;
+    m_bestFromImport = false;
     m_level = 0;
     m_escalatedAt = 0;
+    m_levelBase = 0;
+    m_preloadEnd = 0;
+    m_preloadTiming = false;
     m_finestTier = currentStep().tier;
     m_phase = Phase::Search;
     if (m_restoreMode == RestoreMode::Checkpoint) createCheckpointHere();
@@ -1248,8 +1335,7 @@ bool Solver::advanceSearch() {
     }
     if (timeUp()) {
         m_failReason = "time limit reached";
-        std::vector<uint8_t> best = m_best.size() > m_path.size() ? m_best : heldOf(m_path);
-        finish(false, best, false, false, false);
+        stopWithBest();
         return false;
     }
     if (m_level > 0 && m_maxTick > m_escalatedAt + kDeescalateTicks) deescalate();
@@ -1269,7 +1355,11 @@ void Solver::handleSearchDeath() {
     if (pruned) m_prunes++;
     clearStepFlags();
 
-    if (m_path.size() > m_best.size()) m_best = heldOf(m_path);
+    m_preloadEnd = 0;
+    if (m_path.size() > m_best.size()) {
+        m_best = heldOf(m_path);
+        m_bestFromImport = m_fromImport;
+    }
     failNode = std::min(failNode, static_cast<int>(m_path.size()) - 1);
     if (failNode < 0) {
         if (canEscalate()) {
@@ -1278,7 +1368,8 @@ void Solver::handleSearchDeath() {
         }
         if (trySearchFallback()) return;
         m_failReason = "the level kills the player before any input can help";
-        finish(false, m_best, false, false, false);
+        m_exhausted = true;
+        stopWithBest();
         return;
     }
     dfsBacktrack(failNode);
@@ -1295,13 +1386,16 @@ void Solver::dfsBacktrack(int failNode) {
             auto& node = m_path.back();
             node.held = static_cast<uint8_t>(next);
             node.tried = static_cast<uint8_t>(node.tried | (1u << next));
+            if (t == 0) m_fromImport = false;
             m_backtracks++;
             restoreTo(t);
             return;
         }
-        if (m_path.back().hash != 0) m_dead.insert(m_path.back().hash);
+        auto const& popped = m_path.back();
+        if (popped.hash != 0 && !popped.seeded) m_dead.insert(popped.hash);
         m_path.pop_back();
-        if (m_maxTick - t > kEscalateTicks && canEscalate()) {
+        int base = m_level == 0 ? m_maxTick : std::min(m_maxTick, m_levelBase);
+        if (base - t > kEscalateTicks && canEscalate()) {
             escalate();
             return;
         }
@@ -1312,22 +1406,34 @@ void Solver::dfsBacktrack(int failNode) {
             }
             if (trySearchFallback()) return;
             m_failReason = "stuck: no working input found for this section";
-            finish(false, m_best, false, false, false);
+            stopWithBest();
             return;
         }
     }
+    m_fromImport = false;
     if (canEscalate()) {
         escalate();
         return;
     }
     if (trySearchFallback()) return;
     m_failReason = "no possible path was found";
+    m_exhausted = true;
+    stopWithBest();
+}
+
+void Solver::stopWithBest() {
+    if (m_path.size() > m_best.size()) {
+        m_best = heldOf(m_path);
+        m_bestFromImport = m_fromImport;
+    }
+    m_fromImport = m_bestFromImport;
     finish(false, m_best, false, false, false);
 }
 
 bool Solver::trySearchFallback() {
     if (timeUp()) return false;
     std::vector<uint8_t> best = m_best;
+    bool bestFromImport = m_bestFromImport;
     float percent = m_maxPercent;
     if (m_fastAllowed) {
         log::warn("Solver: no path found with fast simulation, searching again in full mode");
@@ -1343,6 +1449,7 @@ bool Solver::trySearchFallback() {
     }
     beginSearchFresh();
     m_best = std::move(best);
+    m_bestFromImport = bestFromImport;
     m_maxPercent = percent;
     return true;
 }
@@ -1403,6 +1510,7 @@ void Solver::onVerifySuccess() {
         m_refineMoved = 0;
         m_refineRan = false;
         m_finalIsEdited = false;
+        m_polishDeadline = runSeconds() + std::max(30.0, 0.75 * m_timeLimitSec);
         if (m_restoreMode == RestoreMode::Checkpoint && m_optimizeEnabled) {
             beginOptimize();
             return;
@@ -1431,7 +1539,25 @@ void Solver::onVerifyFailed(int tick) {
             beginVerify(m_verifiedSeq, Phase::FinalVerify);
             return;
         }
-        if (m_fastAllowed) {
+        if (importRun() && m_fromImport) {
+            log::warn("Solver: the imported chart failed the full-game check at tick {}", tick);
+            if (m_fastAllowed) {
+                m_fastAllowed = false;
+                m_dead.clear();
+                m_path.clear();
+            }
+            m_phase = Phase::Verify;
+            m_seq = m_verifiedSeq;
+            if (!m_request.repairImport) {
+                int failTick = std::clamp(tick, 0, static_cast<int>(m_seq.size()));
+                m_maxPercent = cleanPercent(failPercent, 0.f);
+                m_failReason = fmt::format("the imported inputs fail at {:.0f}%", m_maxPercent);
+                std::vector<uint8_t> prefix(m_seq.begin(), m_seq.begin() + failTick);
+                finish(false, prefix, true, false, false);
+                return;
+            }
+        }
+        else if (m_fastAllowed) {
             log::warn("Solver: fast simulation disagreed with the full game at tick {}, solving again in full mode", tick);
             m_fastAllowed = false;
             m_verifyFailures++;
@@ -1448,9 +1574,11 @@ void Solver::onVerifyFailed(int tick) {
             m_maxPercent = verifiedPercent;
             return;
         }
-        log::warn("Solver: chart failed the clean full-game check at tick {}", tick);
-        m_phase = Phase::Verify;
-        m_seq = m_verifiedSeq;
+        else {
+            log::warn("Solver: chart failed the clean full-game check at tick {}", tick);
+            m_phase = Phase::Verify;
+            m_seq = m_verifiedSeq;
+        }
     }
 
     int failTick = std::clamp(tick, 0, static_cast<int>(m_seq.size()));
@@ -1460,16 +1588,19 @@ void Solver::onVerifyFailed(int tick) {
         if (!m_request.repairImport) {
             log::info("Solver: imported inputs fail at tick {} ({:.1f}%)", tick, failPercent);
             m_failReason = fmt::format("the imported inputs fail at {:.0f}%", m_maxPercent);
-            m_saveOnFailure = false;
             std::vector<uint8_t> prefix(m_seq.begin(), m_seq.begin() + failTick);
             finish(false, prefix, true, false, false);
             return;
         }
         log::info("Solver: imported inputs fail at tick {} ({:.1f}%), repairing from there", tick, failPercent);
     }
-    if (m_path.empty() && failTick > 0) {
+    bool seeded = m_path.empty() && failTick > 0;
+    if (seeded) {
         seedPath(m_seq, failTick);
-        if (m_best.size() < m_path.size()) m_best = heldOf(m_path);
+        if (m_best.size() < m_path.size()) {
+            m_best = heldOf(m_path);
+            m_bestFromImport = m_fromImport;
+        }
     }
 
     m_verifyFailures++;
@@ -1495,7 +1626,13 @@ void Solver::onVerifyFailed(int tick) {
 
     int rewind = std::clamp(tick - kRepairRewindTicks, 0, static_cast<int>(m_path.size()));
     m_path.resize(static_cast<size_t>(rewind));
+    if (m_path.empty()) m_fromImport = false;
     m_maxTick = rewind;
+    m_preloadEnd = 0;
+    if (seeded) {
+        m_escalatedAt = rewind;
+        m_levelBase = rewind;
+    }
     m_phase = Phase::Search;
     m_finestTier = std::max(m_finestTier, currentStep().tier);
     restoreTo(rewind);
@@ -1577,18 +1714,17 @@ int Solver::nextOptNoteInLane(int index) const {
 }
 
 bool Solver::joinAllowed(RefineNote const& note, RefineNote const& next) const {
-    if (!m_preferHolds) return false;
     int gap = next.start - note.end;
     if (gap <= 0) return false;
     if (continuousAt(note.lane, note.start)) {
-        return static_cast<double>(gap) * 1000.0 / kTicksPerSecond < m_mergeGapMs;
+        return m_mergeGapMs > 0.0 && static_cast<double>(gap) * 1000.0 / kTicksPerSecond < m_mergeGapMs;
     }
-    return gap <= kJoinGapTicks;
+    return m_preferHolds && gap <= kJoinGapTicks;
 }
 
 void Solver::beginOptimize() {
     m_phase = Phase::Optimize;
-    m_optDeadline = Clock::now() + std::chrono::seconds(std::max(20, m_timeLimitSec / 4));
+    m_optDeadline = std::min(runSeconds() + std::max(10.0, m_timeLimitSec / 4.0), m_polishDeadline);
     m_optEdits = 0;
     m_optNotes = notesOf(m_seq);
     m_optCursorStart = -1;
@@ -1604,7 +1740,7 @@ void Solver::nextOptNote() {
     while (true) {
         int index = firstOptNoteAfter(m_optCursorStart, m_optCursorLane);
         if (index < 0) break;
-        if (Clock::now() > m_optDeadline) {
+        if (runSeconds() > m_optDeadline) {
             log::warn("Solver: input cleanup ran out of time at note {}/{}", index, m_optNotes.size());
             break;
         }
@@ -1625,7 +1761,7 @@ bool Solver::nextOptTest() {
         int index = findOptNote(m_optCursorStart, m_optCursorLane);
         if (index < 0) return false;
         RefineNote const note = m_optNotes[index];
-        if ((m_optStep == OptStep::Remove || m_optStep == OptStep::Join) && Clock::now() > m_optDeadline) {
+        if ((m_optStep == OptStep::Remove || m_optStep == OptStep::Join) && runSeconds() > m_optDeadline) {
             m_optStep = OptStep::Finished;
             return false;
         }
@@ -1840,7 +1976,7 @@ std::vector<uint8_t> Solver::shiftedSeq(RefineNote const& note, int shift) const
 void Solver::beginRefine() {
     m_phase = Phase::Refine;
     m_refineRan = true;
-    m_refineDeadline = Clock::now() + std::chrono::seconds(std::max(30, m_timeLimitSec / 2));
+    m_refineDeadline = std::min(runSeconds() + std::max(20.0, m_timeLimitSec / 2.0), m_polishDeadline);
     m_refineNotes = notesOf(m_seq);
     m_refineIndex = 0;
     m_refineMoved = 0;
@@ -1851,7 +1987,7 @@ void Solver::beginRefine() {
 void Solver::startRefineNote() {
     int total = static_cast<int>(m_seq.size());
     while (m_refineIndex < m_refineNotes.size()) {
-        if (Clock::now() > m_refineDeadline) {
+        if (runSeconds() > m_refineDeadline) {
             log::warn("Solver: timing refinement ran out of time at note {}/{}", m_refineIndex, m_refineNotes.size());
             break;
         }
@@ -2096,6 +2232,10 @@ void Solver::finish(bool success, std::vector<uint8_t> const& seq, bool verified
     chart.refined = refined;
     chart.reachedPercent = complete ? 100.f : cleanPercent(success ? std::max(m_targetPercent, 0.f) : m_maxPercent, 0.f);
     chart.info = m_request.info;
+    if (importRun() && !m_fromImport) {
+        chart.info.source = "solver";
+        chart.info.sourceFile.clear();
+    }
     chart.info.levelID = m_ref.levelID;
     chart.info.levelName = m_ref.levelName;
     chart.info.levelHash = m_ref.levelHash;
@@ -2117,8 +2257,10 @@ void Solver::finish(bool success, std::vector<uint8_t> const& seq, bool verified
         m_hasResult = true;
         if (!saveChart(m_ref, m_result)) log::warn("Solver: failed to save the chart for {}", m_key);
     }
-    if (success) deleteProgress(m_ref);
-    else if (m_saveOnFailure) saveProgress();
+    if (!importRun()) {
+        if (success || m_exhausted) deleteProgress(m_ref);
+        else saveProgress();
+    }
 
     log::info(
         "Solver finished: success={} complete={} verified={} refined={} optimized={} relaxed={} precision={} notes={}+{} time={:.1f}s steps={} reason='{}'",
@@ -2175,6 +2317,9 @@ std::string Solver::phaseNote() const {
             else {
                 note = fmt::format("Ship/wave precision: {} for this section", tierName(step.tier));
             }
+            if (importRun()) {
+                note = fmt::format("{}  |  {}", m_fromImport ? "Repairing the imported inputs" : "Solving without the imported inputs", note);
+            }
             break;
         }
         case Phase::Verify:
@@ -2215,6 +2360,7 @@ SolverView Solver::view() const {
         case Phase::Done: view.title = "Done"; break;
         case Phase::Failed: view.title = "Stopped"; break;
     }
+    if (importRun() && running()) view.title = "Checking imported inputs";
 
     bool checkpointMode = m_restoreMode == RestoreMode::Checkpoint;
     view.steps = {"Test", "Search", "Check"};

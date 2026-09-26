@@ -30,7 +30,14 @@ struct Session {
     bool menuShown = false;
     bool menuOpen = false;
     bool importBusy = false;
+    bool importLoading = false;
     bool chartHidden = false;
+    bool menuAtLevelStart = false;
+    bool audioHeld = false;
+    bool cancelSaved = false;
+    StartPosObject* refStartPos = nullptr;
+    cocos2d::CCPoint refStartPosAt;
+    bool refFlip = false;
     std::string lastSolverStatus;
     geode::Ref<cocos2d::CCNode> overlay;
     geode::Ref<cocos2d::CCNode> menu;

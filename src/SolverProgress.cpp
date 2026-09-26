@@ -198,6 +198,7 @@ std::optional<ProgressSummary> readHeader(Reader& in) {
     summary.savedAt = in.i64();
     summary.pathFound = in.u8() != 0;
     summary.targetPercent = cleanFloat(in.f32(), 100.f, 0.f, 100.f);
+    summary.levelHash = in.u64();
     if (!in.ok()) return std::nullopt;
     return summary;
 }
@@ -214,8 +215,8 @@ std::string SolveProgress::serialize() const {
     out.i64(savedAt);
     out.u8(pathFound ? 1 : 0);
     out.f32(targetPercent);
-
     out.u64(levelHash);
+
     out.str(settingsSignature);
     out.u64(totalSteps);
     out.u64(backtracks);
@@ -251,8 +252,8 @@ std::optional<SolveProgress> SolveProgress::deserialize(std::string_view data) {
     progress.savedAt = header->savedAt;
     progress.pathFound = header->pathFound;
     progress.targetPercent = header->targetPercent;
+    progress.levelHash = header->levelHash;
 
-    progress.levelHash = in.u64();
     progress.settingsSignature = in.str(kMaxSignature);
     progress.totalSteps = in.u64();
     progress.backtracks = in.u64();

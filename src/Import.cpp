@@ -18,23 +18,32 @@ namespace {
 constexpr int64_t kMaxTicks = 50'000'000;
 constexpr uintmax_t kMaxImportBytes = 64ull * 1024 * 1024;
 constexpr int kMaxDepth = 64;
-constexpr size_t kMaxValues = 12'000'000;
+constexpr size_t kMaxValues = 4'000'000;
 constexpr uint64_t kMaxMapKeys = 64;
 constexpr char const* kUnsupported =
     "Unsupported file format. Import a Rhythm Path chart (.rpchart) or a GDR macro (.gdr, .gdr.json).";
+constexpr char const* kTooLarge = "The file is too large to import.";
+constexpr char const* kInvalidJson = "The macro file is not valid JSON.";
 
 class MsgPackReader {
 public:
     explicit MsgPackReader(std::string_view data) : m_data(data) {}
 
-    std::optional<matjson::Value> readRoot(std::initializer_list<std::string_view> keep) {
+    std::optional<matjson::Value> readRoot(
+        std::initializer_list<std::string_view> keep, std::initializer_list<std::string_view> keepNested
+    ) {
         m_keep = keep;
+        m_keepNested = keepNested;
         uint8_t tag = 0;
         if (!peek(tag)) return std::nullopt;
         if (!((tag >= 0x80 && tag <= 0x8f) || tag == 0xde || tag == 0xdf)) return std::nullopt;
         matjson::Value out;
         if (!readValue(out, 0)) return std::nullopt;
         return out;
+    }
+
+    bool tooLarge() const {
+        return m_tooLarge;
     }
 
 private:
@@ -52,7 +61,9 @@ private:
     std::string_view m_data;
     size_t m_pos = 0;
     size_t m_values = 0;
+    bool m_tooLarge = false;
     std::initializer_list<std::string_view> m_keep;
+    std::initializer_list<std::string_view> m_keepNested;
 
     size_t remaining() const {
         return m_data.size() - m_pos;
@@ -201,13 +212,17 @@ private:
     }
 
     bool wanted(std::string_view key, int depth) const {
-        if (depth != 0 || m_keep.size() == 0) return true;
-        return std::find(m_keep.begin(), m_keep.end(), key) != m_keep.end();
+        auto const& list = depth == 0 ? m_keep : m_keepNested;
+        if ((depth != 0 && depth != 2) || list.size() == 0) return true;
+        return std::find(list.begin(), list.end(), key) != list.end();
     }
 
     bool readValue(matjson::Value& out, int depth) {
         if (depth > kMaxDepth) return false;
-        if (++m_values > kMaxValues) return false;
+        if (++m_values > kMaxValues) {
+            m_tooLarge = true;
+            return false;
+        }
         Head h;
         if (!readHead(h)) return false;
         switch (h.kind) {
@@ -282,40 +297,100 @@ private:
     }
 };
 
-std::optional<std::string> checkJsonShape(std::string_view text) {
-    int depth = 0;
+bool isJsonSpace(char c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+Result<std::string> filterJsonRoot(std::string_view text, std::initializer_list<std::string_view> keep) {
+    size_t const n = text.size();
+    size_t i = 0;
+    auto skipSpace = [&]() {
+        while (i < n && isJsonSpace(text[i])) i++;
+    };
+    skipSpace();
+    if (i >= n || text[i] != '{') return Err(kInvalidJson);
+    i++;
+    std::string out = "{";
+    bool firstKept = true;
     size_t tokens = 0;
-    bool inString = false;
-    bool escape = false;
-    for (char c : text) {
-        if (inString) {
-            if (escape) escape = false;
-            else if (c == '\\') escape = true;
-            else if (c == '"') inString = false;
-            continue;
-        }
-        switch (c) {
-            case '"':
-                inString = true;
-                break;
-            case '{':
-            case '[':
-                if (++depth > kMaxDepth) return "The macro file is nested too deeply.";
-                tokens++;
-                break;
-            case '}':
-            case ']':
-                depth--;
-                break;
-            case ',':
-                tokens++;
-                break;
-            default:
-                break;
-        }
-        if (tokens > kMaxValues) return "The macro file is too large.";
+    skipSpace();
+    if (i < n && text[i] == '}') {
+        i++;
     }
-    return std::nullopt;
+    else {
+        while (true) {
+            skipSpace();
+            if (i >= n || text[i] != '"') return Err(kInvalidJson);
+            size_t keyStart = ++i;
+            bool escape = false;
+            while (i < n) {
+                char c = text[i];
+                if (escape) escape = false;
+                else if (c == '\\') escape = true;
+                else if (c == '"') break;
+                i++;
+            }
+            if (i >= n) return Err(kInvalidJson);
+            std::string_view key = text.substr(keyStart, i - keyStart);
+            i++;
+            skipSpace();
+            if (i >= n || text[i] != ':') return Err(kInvalidJson);
+            i++;
+            skipSpace();
+            bool kept = std::find(keep.begin(), keep.end(), key) != keep.end();
+            size_t valueStart = i;
+            int depth = 0;
+            bool inString = false;
+            escape = false;
+            for (; i < n; i++) {
+                char c = text[i];
+                if (inString) {
+                    if (escape) escape = false;
+                    else if (c == '\\') escape = true;
+                    else if (c == '"') inString = false;
+                    continue;
+                }
+                if (c == '"') {
+                    inString = true;
+                }
+                else if (c == '{' || c == '[') {
+                    depth++;
+                    if (kept) {
+                        if (depth + 1 > kMaxDepth) return Err("The macro file is nested too deeply.");
+                        tokens++;
+                    }
+                }
+                else if (c == '}' || c == ']') {
+                    if (depth == 0) break;
+                    depth--;
+                }
+                else if (c == ',') {
+                    if (depth == 0) break;
+                    if (kept) tokens++;
+                }
+                if (tokens > kMaxValues) return Err(kTooLarge);
+            }
+            if (i >= n) return Err(kInvalidJson);
+            size_t valueEnd = i;
+            while (valueEnd > valueStart && isJsonSpace(text[valueEnd - 1])) valueEnd--;
+            if (valueEnd == valueStart) return Err(kInvalidJson);
+            if (kept) {
+                if (!firstKept) out += ',';
+                firstKept = false;
+                out += '"';
+                out += key;
+                out += "\":";
+                out += text.substr(valueStart, valueEnd - valueStart);
+            }
+            char sep = text[i++];
+            if (sep == '}') break;
+            if (sep != ',') return Err(kInvalidJson);
+        }
+    }
+    skipSpace();
+    if (i != n) return Err(kInvalidJson);
+    out += '}';
+    return Ok(std::move(out));
 }
 
 std::optional<double> numberOf(matjson::Value const& v) {
@@ -379,7 +454,7 @@ struct InputEvent {
     bool down = false;
 };
 
-Result<ImportedInputs> importGdr(matjson::Value const& root) {
+Result<ImportedInputs> importGdr(matjson::Value const& root, ImportContext const& context) {
     if (!root.isObject()) return Err(kUnsupported);
     auto const& inputs = root["inputs"];
     if (!inputs.isArray()) return Err(kUnsupported);
@@ -411,6 +486,7 @@ Result<ImportedInputs> importGdr(matjson::Value const& root) {
     }
 
     int offset = xdBotFrameOffset(botName, botVersion);
+    bool xdBot = botName == "xdBot";
     double scale = kTicksPerSecond / framerate;
 
     std::vector<InputEvent> events;
@@ -426,14 +502,19 @@ Result<ImportedInputs> importGdr(matjson::Value const& root) {
             otherButtons = true;
             continue;
         }
-        bool p2 = boolOf(input["2p"]).value_or(false);
+        bool stored = boolOf(input["2p"]).value_or(false);
+        int lane = 0;
+        if (context.twoPlayerLevel) {
+            if (xdBot) lane = stored != context.flipTwoPlayer ? 0 : 1;
+            else lane = stored ? 1 : 0;
+        }
         double f = *frame + offset;
         if (f < 0.0) continue;
         double t = f * scale;
         if (t >= static_cast<double>(kMaxTicks)) return Err("The macro is too long to import.");
         InputEvent ev;
         ev.tick = std::llround(t);
-        ev.lane = p2 ? 1 : 0;
+        ev.lane = lane;
         ev.down = *down;
         events.push_back(ev);
     }
@@ -444,32 +525,41 @@ Result<ImportedInputs> importGdr(matjson::Value const& root) {
     std::stable_sort(events.begin(), events.end(), [](InputEvent const& a, InputEvent const& b) { return a.tick < b.tick; });
 
     int64_t length = events.back().tick + 1;
+    uint8_t finalHeld = 0;
+    for (int lane = 0; lane < kLaneCount; lane++) {
+        bool state = false;
+        int64_t last = -1;
+        for (auto const& ev : events) {
+            if (ev.lane != lane || ev.down == state) continue;
+            int64_t at = std::max(ev.tick, last + 1);
+            state = ev.down;
+            last = at;
+            length = std::max(length, state ? at + 1 : at);
+        }
+        if (state) finalHeld |= static_cast<uint8_t>(1u << lane);
+    }
     if (length <= 0 || length > kMaxTicks) return Err("The macro is too long to import.");
 
     out.held.assign(static_cast<size_t>(length), 0);
-    uint8_t cur = 0;
-    size_t idx = 0;
-    while (idx < events.size()) {
-        int64_t t = events[idx].tick;
-        uint8_t pressed = 0;
-        while (idx < events.size() && events[idx].tick == t) {
-            uint8_t bit = static_cast<uint8_t>(1u << events[idx].lane);
-            if (events[idx].down) {
-                cur |= bit;
-                pressed |= bit;
-            }
-            else {
-                cur &= static_cast<uint8_t>(~bit);
-            }
-            idx++;
+    for (int lane = 0; lane < kLaneCount; lane++) {
+        uint8_t bit = static_cast<uint8_t>(1u << lane);
+        bool state = false;
+        int64_t last = -1;
+        int64_t start = 0;
+        auto fill = [&](int64_t from, int64_t to) {
+            for (int64_t t = from; t < to; t++) out.held[static_cast<size_t>(t)] |= bit;
+        };
+        for (auto const& ev : events) {
+            if (ev.lane != lane || ev.down == state) continue;
+            int64_t at = std::max(ev.tick, last + 1);
+            state = ev.down;
+            last = at;
+            if (state) start = at;
+            else fill(start, at);
         }
-        out.held[static_cast<size_t>(t)] = static_cast<uint8_t>(cur | pressed);
-        int64_t next = idx < events.size() ? events[idx].tick : length;
-        if (cur != 0) {
-            std::fill(out.held.begin() + static_cast<ptrdiff_t>(t + 1), out.held.begin() + static_cast<ptrdiff_t>(next), cur);
-        }
+        if (state) fill(start, length);
     }
-    if (cur != 0) out.held.insert(out.held.end(), static_cast<size_t>(kTicksPerSecond), cur);
+    if (finalHeld != 0) out.held.insert(out.held.end(), static_cast<size_t>(kTicksPerSecond), finalHeld);
 
     for (auto v : out.held) {
         if (v & 2) {
@@ -481,7 +571,7 @@ Result<ImportedInputs> importGdr(matjson::Value const& root) {
     return Ok(std::move(out));
 }
 
-Result<ImportedInputs> importChartText(std::string_view text) {
+Result<ImportedInputs> importChartText(std::string_view text, ImportContext const& context) {
     auto chart = Chart::deserialize(std::string(text));
     if (!chart) return Err("This Rhythm Path chart is damaged or from an unsupported version.");
     if (chart->held.empty()) chart->rebuildHeldFromNotes();
@@ -490,20 +580,18 @@ Result<ImportedInputs> importChartText(std::string_view text) {
     out.macroLevelID = chart->info.levelID;
     out.macroLevelName = chart->info.levelName;
     bool any = false;
-    for (auto v : chart->held) {
-        if (v & 1) any = true;
-        if (v & 2) {
-            any = true;
-            out.usesP2 = true;
-        }
+    for (auto& v : chart->held) {
+        v = static_cast<uint8_t>(v & 3);
+        if (!context.twoPlayerLevel) v = static_cast<uint8_t>((v | (v >> 1)) & 1);
+        if (v != 0) any = true;
+        if (v & 2) out.usesP2 = true;
     }
-    if (!chart->lanes[1].empty()) out.usesP2 = true;
     if (!any) return Err("The chart has no inputs.");
     out.held = std::move(chart->held);
     return Ok(std::move(out));
 }
 
-Result<ImportedInputs> importDataImpl(std::string_view data) {
+Result<ImportedInputs> importDataImpl(std::string_view data, ImportContext const& context) {
     std::string_view body = data;
     if (body.size() >= 3 && static_cast<unsigned char>(body[0]) == 0xEF && static_cast<unsigned char>(body[1]) == 0xBB &&
         static_cast<unsigned char>(body[2]) == 0xBF) {
@@ -516,19 +604,19 @@ Result<ImportedInputs> importDataImpl(std::string_view data) {
     std::string_view text = body.substr(first);
     if (text.empty()) return Err(kUnsupported);
 
-    if (text.starts_with("RHYTHMPATH")) return importChartText(text);
+    if (text.starts_with("RHYTHMPATH")) return importChartText(text, context);
 
     if (text.front() == '{') {
-        if (auto err = checkJsonShape(text)) return Err(*err);
-        auto parsed = matjson::parse(text);
-        if (!parsed) return Err("The macro file is not valid JSON.");
-        return importGdr(parsed.unwrap());
+        GEODE_UNWRAP_INTO(auto filtered, filterJsonRoot(text, {"inputs", "framerate", "bot", "level"}));
+        auto parsed = matjson::parse(filtered);
+        if (!parsed) return Err(kInvalidJson);
+        return importGdr(parsed.unwrap(), context);
     }
 
     MsgPackReader reader(data);
-    auto root = reader.readRoot({"inputs", "framerate", "bot", "level"});
-    if (!root) return Err(kUnsupported);
-    return importGdr(*root);
+    auto root = reader.readRoot({"inputs", "framerate", "bot", "level"}, {"frame", "btn", "2p", "down"});
+    if (!root) return Err(reader.tooLarge() ? kTooLarge : kUnsupported);
+    return importGdr(*root, context);
 }
 
 }
@@ -550,10 +638,10 @@ std::vector<geode::utils::file::FilePickOptions::Filter> importFilters() {
     return filters;
 }
 
-Result<ImportedInputs> importInputsFromData(std::string_view data, std::string_view fileName) {
+Result<ImportedInputs> importInputsFromData(std::string_view data, std::string_view fileName, ImportContext const& context) {
     try {
-        if (data.size() > kMaxImportBytes) return Err("The file is too large to import.");
-        return importDataImpl(data);
+        if (data.size() > kMaxImportBytes) return Err(kTooLarge);
+        return importDataImpl(data, context);
     }
     catch (std::exception const& e) {
         log::warn("Import of {} failed: {}", fileName, e.what());
@@ -565,19 +653,19 @@ Result<ImportedInputs> importInputsFromData(std::string_view data, std::string_v
     }
 }
 
-Result<ImportedInputs> importInputsFromFile(std::filesystem::path const& path) {
+Result<ImportedInputs> importInputsFromFile(std::filesystem::path const& path, ImportContext const& context) {
     try {
         std::error_code ec;
         if (!std::filesystem::is_regular_file(path, ec) || ec) return Err("The file could not be opened.");
         auto size = std::filesystem::file_size(path, ec);
         if (ec) return Err("The file could not be opened.");
-        if (size > kMaxImportBytes) return Err("The file is too large to import.");
+        if (size > kMaxImportBytes) return Err(kTooLarge);
         auto res = file::readBinary(path);
         if (!res) return Err(fmt::format("The file could not be read: {}", res.unwrapErr()));
         auto bytes = std::move(res).unwrap();
         std::string_view data(reinterpret_cast<char const*>(bytes.data()), bytes.size());
         auto name = utils::string::pathToString(path.filename());
-        return importInputsFromData(data, name);
+        return importInputsFromData(data, name, context);
     }
     catch (std::exception const& e) {
         log::warn("Import failed: {}", e.what());

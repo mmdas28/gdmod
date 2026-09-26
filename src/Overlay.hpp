@@ -92,6 +92,7 @@ private:
     OverlayStyle m_style;
     int m_styleAge = 1 << 20;
     Geometry m_geo;
+    float m_bigLineHeight = 32.f;
 
     cocos2d::CCDrawNode* m_draw = nullptr;
     cocos2d::CCMenu* m_panelMenu = nullptr;
@@ -109,6 +110,7 @@ private:
     TextSlot m_percentCaption;
     TextSlot m_detail;
     TextSlot m_note;
+    TextSlot m_saveHint;
     TextSlot m_steps[kMaxSteps];
 
     Popup m_popups[kLaneCount];

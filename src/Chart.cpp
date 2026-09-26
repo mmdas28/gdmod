@@ -107,6 +107,17 @@ std::string_view trimView(std::string_view text) {
     return text;
 }
 
+size_t countNoteStarts(uint8_t const* held, size_t size, uint8_t mask) {
+    size_t count = 0;
+    bool prev = false;
+    for (size_t t = 0; t < size; t++) {
+        bool down = (held[t] & mask) != 0;
+        if (down && !prev) count++;
+        prev = down;
+    }
+    return count;
+}
+
 void normalizeLane(std::vector<Note>& lane) {
     std::stable_sort(lane.begin(), lane.end(), [](Note const& a, Note const& b) {
         if (a.startTick != b.startTick) return a.startTick < b.startTick;
@@ -162,6 +173,7 @@ void Chart::rebuildNotes() {
     int total = static_cast<int>(std::min<size_t>(held.size(), static_cast<size_t>(kMaxTicks) * 2));
     for (int lane = 0; lane < kLaneCount; lane++) {
         uint8_t mask = static_cast<uint8_t>(1u << lane);
+        lanes[lane].reserve(countNoteStarts(held.data(), static_cast<size_t>(total), mask));
         int start = -1;
         for (int t = 0; t <= total; t++) {
             bool down = t < total && (held[t] & mask);
@@ -364,7 +376,8 @@ std::optional<Chart> Chart::deserialize(std::string const& text) {
             sawHeld = true;
             int64_t total = 0;
             if (!nextInt(toks, total) || total < 0 || total > kMaxTicks) return std::nullopt;
-            std::vector<std::pair<uint8_t, int64_t>> runs;
+            chart.held.clear();
+            chart.held.reserve(static_cast<size_t>(total));
             int64_t sum = 0;
             std::string_view tok;
             while (toks.next(tok)) {
@@ -372,14 +385,9 @@ std::optional<Chart> Chart::deserialize(std::string const& text) {
                 if (!parseInt(tok, value) || !nextInt(toks, count)) return std::nullopt;
                 if (value < 0 || value > 3 || count <= 0 || count > total - sum) return std::nullopt;
                 sum += count;
-                runs.emplace_back(static_cast<uint8_t>(value), count);
+                chart.held.insert(chart.held.end(), static_cast<size_t>(count), static_cast<uint8_t>(value));
             }
             if (sum != total) return std::nullopt;
-            chart.held.clear();
-            chart.held.reserve(static_cast<size_t>(total));
-            for (auto const& [value, count] : runs) {
-                chart.held.insert(chart.held.end(), static_cast<size_t>(count), value);
-            }
         }
         else if (version == 1) {
             return std::nullopt;
@@ -393,6 +401,11 @@ std::optional<Chart> Chart::deserialize(std::string const& text) {
         chart.rebuildHeldFromNotes();
     }
     else if (chart.lanes[0].empty() && chart.lanes[1].empty()) {
+        size_t starts = 0;
+        for (int lane = 0; lane < kLaneCount; lane++) {
+            starts += countNoteStarts(chart.held.data(), chart.held.size(), static_cast<uint8_t>(1u << lane));
+        }
+        if (starts > kMaxNotes) return std::nullopt;
         chart.rebuildNotes();
     }
     return chart;

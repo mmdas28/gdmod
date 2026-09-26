@@ -398,6 +398,7 @@ void LevelMenu::refresh() {
     addLabel(content, "Solve", "goldFont.fnt", .5f, {kPad, 135.f}, {0.f, .5f}, kWhite, "solve-heading"_spr);
 
     bool platformer = isPlatformer(s->layer);
+    bool progressOutdated = s->progress && s->progress->levelHash != s->ref.levelHash;
     std::string info;
     ccColor3B infoColor = kDim;
     if (platformer) {
@@ -405,7 +406,11 @@ void LevelMenu::refresh() {
         infoColor = kOrange;
     }
     else if (s->importBusy) {
-        info = "Choose a file to import...";
+        info = s->importLoading ? "Importing..." : "Choose a file to import...";
+    }
+    else if (progressOutdated) {
+        info = "Saved progress is for an older version of this level";
+        infoColor = kOrange;
     }
     else if (s->progress) {
         auto const& p = *s->progress;
@@ -428,19 +433,25 @@ void LevelMenu::refresh() {
         std::vector<CCNode*> row;
         if (s->progress) {
             auto const& p = *s->progress;
-            auto label = fmt::format("Resume ({:.0f}%, {})", std::floor(std::clamp(p.percent, 0.f, 100.f)), formatDuration(p.elapsedSeconds));
-            auto resume = makeButton(label.c_str(), "GJ_button_01.png", .55f, "resume-button"_spr, [this](CCMenuItemSpriteExtra*) {
-                auto s = menuSession(this);
-                if (!s) return;
-                requestSolve(*s, SolveKind::Resume);
-            });
-            auto restart = makeButton("Start over", "GJ_button_04.png", .55f, "start-over-button"_spr, [this](CCMenuItemSpriteExtra*) {
+            if (!progressOutdated) {
+                auto label = fmt::format("Resume ({:.0f}%, {}", std::floor(std::clamp(p.percent, 0.f, 100.f)), formatDuration(p.elapsedSeconds));
+                if (std::isfinite(p.targetPercent) && p.targetPercent >= 1.f && p.targetPercent < 100.f) {
+                    label += fmt::format(", up to {}%", percentText(p.targetPercent));
+                }
+                label += ")";
+                auto resume = makeButton(label.c_str(), "GJ_button_01.png", .55f, "resume-button"_spr, [this](CCMenuItemSpriteExtra*) {
+                    auto s = menuSession(this);
+                    if (!s) return;
+                    requestSolve(*s, SolveKind::Resume);
+                });
+                row.push_back(resume);
+            }
+            auto restart = makeButton("Start over", progressOutdated ? "GJ_button_01.png" : "GJ_button_04.png", .55f, "start-over-button"_spr, [this](CCMenuItemSpriteExtra*) {
                 auto s = menuSession(this);
                 if (!s) return;
                 deleteSavedProgress(*s);
                 requestSolve(*s, SolveKind::Fresh);
             });
-            row.push_back(resume);
             row.push_back(restart);
         }
         else {
