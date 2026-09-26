@@ -17,6 +17,11 @@ rp::Solver* runningSolver(rp::Session* s) {
     return s->solver.get();
 }
 
+bool skippingVisuals(GJBaseGameLayer* layer) {
+    auto solver = runningSolver(rp::sessionFor(layer));
+    return solver && solver->skipVisuals();
+}
+
 }
 
 class $modify(RPPlayLayer, PlayLayer) {
@@ -112,6 +117,26 @@ class $modify(RPPlayLayer, PlayLayer) {
         if (runningSolver(rpSession())) return;
         PlayLayer::processCheckpoints();
     }
+
+    void pauseGame(bool unfocused) {
+        if (auto solver = runningSolver(rpSession())) solver->onPause();
+        PlayLayer::pauseGame(unfocused);
+    }
+
+    void updateVisibility(float dt) {
+        if (skippingVisuals(this)) return;
+        PlayLayer::updateVisibility(dt);
+    }
+
+    void updateProgressbar() {
+        if (skippingVisuals(this)) return;
+        PlayLayer::updateProgressbar();
+    }
+
+    void updateInfoLabel() {
+        if (skippingVisuals(this)) return;
+        PlayLayer::updateInfoLabel();
+    }
 };
 
 class $modify(RPBaseGameLayer, GJBaseGameLayer) {
@@ -141,6 +166,26 @@ class $modify(RPBaseGameLayer, GJBaseGameLayer) {
         solver->beforeStep(isHalfTick);
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
         solver->afterStep(isHalfTick);
+    }
+
+    void updateParticles(float dt) {
+        if (skippingVisuals(this)) return;
+        GJBaseGameLayer::updateParticles(dt);
+    }
+
+    void updateShaderLayer(float dt) {
+        if (skippingVisuals(this)) return;
+        GJBaseGameLayer::updateShaderLayer(dt);
+    }
+
+    void updateAudioVisualizer() {
+        if (skippingVisuals(this)) return;
+        GJBaseGameLayer::updateAudioVisualizer();
+    }
+
+    void updateDebugDraw() {
+        if (skippingVisuals(this)) return;
+        GJBaseGameLayer::updateDebugDraw();
     }
 
     void handleButton(bool down, int button, bool isPlayer1) {

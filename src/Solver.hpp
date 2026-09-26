@@ -60,6 +60,21 @@ struct StatSnapshot {
     int layerClicks = 0;
 };
 
+struct ProbeState {
+    bool active = false;
+    bool running = false;
+    int deathTick = 0;
+    int failNode = 0;
+    int target = 0;
+    int floor = 0;
+    int cand = 0;
+    int maskIndex = 0;
+    uint8_t held = 0;
+    int bestCand = -1;
+    uint8_t bestHeld = 0;
+    int bestReach = 0;
+};
+
 struct RefineNote {
     int lane = 0;
     int start = 0;
@@ -86,6 +101,8 @@ public:
     bool isStepping() const { return m_inStep; }
     bool isInjecting() const { return m_injecting; }
     bool isInternalReset() const { return m_internalReset; }
+    bool skipVisuals() const { return m_inStep && running() && fastModeNow(); }
+    void onPause();
 
     void beforeStep(bool halfTick);
     void afterStep(bool halfTick);
@@ -127,6 +144,15 @@ private:
     int m_stallFrames = 0;
     bool m_sawHalfTick = false;
 
+    bool m_fastAllowed = false;
+    bool m_layerHidden = false;
+    bool m_layerWasVisible = true;
+    ProbeState m_probe;
+    int m_dfsUntil = -1;
+    double m_stepCostUs = 30.0;
+    double m_cpCostUs = 250.0;
+    bool m_finalIsRefined = false;
+
     int m_stepsPerUpdate = 2;
     int m_inputResolution = 1;
     int m_frameBudgetMs = 14;
@@ -159,6 +185,8 @@ private:
     int m_selfTestLength = 0;
     int m_selfTestMismatch = -1;
     int m_selfTestCpTick = -1;
+    bool m_selfTestDied = false;
+    int m_fastMismatch = -1;
 
     enum class RefineStage { Baseline, Test };
     std::vector<RefineNote> m_refineNotes;
@@ -188,6 +216,8 @@ private:
     uint64_t m_totalSteps = 0;
     uint64_t m_backtracks = 0;
     uint64_t m_prunes = 0;
+    uint64_t m_probeRuns = 0;
+    uint64_t m_greedyCommits = 0;
 
     StatSnapshot m_stats;
     std::string m_key;
@@ -207,6 +237,10 @@ private:
     void releaseAll();
     uint64_t stateHash(int tick) const;
     uint8_t optionCountNow() const;
+    bool fastModeNow() const;
+    void setLayerHidden(bool hidden);
+    void updateCheckpointInterval();
+    void clearStepFlags();
     int nextOption(int tick) const;
 
     void resetToStart();
@@ -226,6 +260,12 @@ private:
 
     void beginSearchFresh();
     void handleSearchDeath();
+    void dfsBacktrack(int failNode);
+    void startProbe(int deathTick, int failNode);
+    void nextProbeCandidate();
+    void commitProbe(int cand, uint8_t held);
+    void finishProbeWithoutSuccess();
+    bool advanceProbe();
     void onSearchSuccess();
     void beginVerify(std::vector<uint8_t> seq, Phase phase);
     void onVerifySuccess();

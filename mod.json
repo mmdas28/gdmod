@@ -8,7 +8,7 @@
 	},
 	"id": "mmdas28.rhythm-path",
 	"name": "Rhythm Path",
-	"version": "v1.0.0",
+	"version": "v1.1.0",
 	"developer": "mmdas28",
 	"description": "Solves the level, then shows its inputs as a scrolling rhythm-game chart.",
 	"tags": [
@@ -38,8 +38,8 @@
 		"steps-per-update": {
 			"type": "int",
 			"name": "Physics steps per simulated frame",
-			"description": "How many 240 TPS physics steps the solver runs per game update while searching. 1 is the most faithful to high-FPS play, 4 matches 60 FPS and is faster.",
-			"default": 2,
+			"description": "How many 240 TPS physics steps the solver runs per simulated frame. Higher is faster. The final check always replays the whole level through the normal game loop.",
+			"default": 4,
 			"min": 1,
 			"max": 8
 		},
@@ -54,10 +54,10 @@
 		"frame-budget": {
 			"type": "int",
 			"name": "Solver CPU budget per frame (ms)",
-			"description": "How much time per rendered frame the solver may use. Higher solves faster but makes the game less responsive while solving.",
-			"default": 14,
+			"description": "How much time per rendered frame the solver may use. The game is hidden while solving, so a high value makes solving faster; the progress screen just updates less often.",
+			"default": 50,
 			"min": 2,
-			"max": 200
+			"max": 500
 		},
 		"refine-timing": {
 			"type": "bool",
