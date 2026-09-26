@@ -19,8 +19,13 @@ struct ImportedInputs {
     std::string macroLevelName;
 };
 
-geode::Result<ImportedInputs> importInputsFromFile(std::filesystem::path const& path);
-geode::Result<ImportedInputs> importInputsFromData(std::string_view data, std::string_view fileName);
+struct ImportContext {
+    bool twoPlayerLevel = false;
+    bool flipTwoPlayer = false;
+};
+
+geode::Result<ImportedInputs> importInputsFromFile(std::filesystem::path const& path, ImportContext const& context);
+geode::Result<ImportedInputs> importInputsFromData(std::string_view data, std::string_view fileName, ImportContext const& context);
 std::vector<geode::utils::file::FilePickOptions::Filter> importFilters();
 
 }

@@ -30,6 +30,7 @@ struct Session {
     bool menuShown = false;
     bool menuOpen = false;
     bool importBusy = false;
+    bool chartHidden = false;
     std::string lastSolverStatus;
     geode::Ref<cocos2d::CCNode> overlay;
     geode::Ref<cocos2d::CCNode> menu;

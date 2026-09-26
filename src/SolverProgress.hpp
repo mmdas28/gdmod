@@ -9,6 +9,7 @@
 namespace rp {
 
 struct ProgressSummary {
+    uint64_t levelHash = 0;
     float percent = 0.f;
     double elapsedSeconds = 0.0;
     int64_t savedAt = 0;

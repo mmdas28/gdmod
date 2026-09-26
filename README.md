@@ -37,9 +37,9 @@ When you open a level, the Rhythm Path menu appears and the level waits until yo
 - **Show chart from / to %**: only show the chart in part of the level (for practising a section). Turn on **This level only** to keep a range just for this level. Otherwise the defaults from the settings apply.
 - **Customize** opens the mod's settings (Geode's own settings screen). **Play without chart** closes the menu.
 
-You can open the menu again from the pause menu (**Rhythm Path**). Turn off **Show on level open** if you'd rather use the pause menu only. Then **Auto-solve when the menu is off** decides whether levels without a chart are solved automatically.
+The level and its music wait while the menu is open, and opening the menu doesn't count as an attempt. You can open the menu again from the pause menu (**Rhythm Path**). Turn off **Show on level open** if you'd rather use the pause menu only. Then **Auto-solve when the menu is off** decides whether levels without a chart are solved automatically (it resumes saved progress if there is some).
 
-Charts are saved per level ID (local levels by name) in the mod's save folder: `levels/<level id>/`. Each start position gets its own chart, and so does each "Flip 2-player controls" setting on 2-player levels.
+Charts are saved per level ID in the mod's save folder: `levels/<level id>/` for online levels, `levels/main-<id>/` for the official levels and `levels/local-…/` for your own levels (by name, so editing a level keeps its chart and shows the "level was updated" warning). Each start position gets its own chart, and so does each "Flip 2-player controls" setting on 2-player levels. If you switch start positions while in a level (for example with a start position switcher mod), the menu and chart switch with it.
 
 ## Playing
 
@@ -58,10 +58,12 @@ While solving, the level is hidden and simulated using only the game's own physi
    - **No spam clicking.** In cube, ball, UFO, robot, spider and swing the default is *not* pressing, so the solver only clicks when a click is needed. In ship and wave it keeps the current input and only changes it when it has to.
    - **Ships and waves.** Nearly identical ship, wave, UFO and swing positions are treated as the same state ("Ship/wave search precision: Fast"). This turns the search into pathfinding on a grid and stops it from getting stuck on long ship sections. If a section can't be solved like that, that section is searched again with exact positions.
    - **Human-playable timing.** Ship and wave holds and gaps have a minimum length (settings). If a section is impossible within those limits, they are relaxed for that section only.
-   - **Progress is saved** every 45 seconds, when you pause, cancel or quit, and when the time limit runs out.
+   - **Progress is saved** every 45 seconds, when you pause, cancel or quit, and when the time limit runs out (not during the first few seconds of testing). Only time spent solving counts toward the time limit, not time paused. A solve that proves there is no path doesn't leave anything to resume.
 3. **Check.** The path is replayed from a clean restart. If it dies anywhere, the search resumes a little before that point.
-4. **Clean up.** Every click is tested: it is removed if it isn't needed, taps are shortened to what matters, and repeated clicks are turned into one hold when holding plays exactly the same. Ship and wave holds with tiny gaps are joined.
-5. **Center.** Every press and release is moved to the middle of the range of ticks that still works, so the chart is as forgiving as possible.
+4. **Clean up.** Each click is tested: it is removed if it isn't needed, taps are shortened to what matters, and repeated clicks are turned into one hold when holding plays exactly the same ("Prefer holding over repeated clicks"). Ship and wave holds with gaps shorter than "Join ship/wave inputs closer than" are joined.
+5. **Center.** Each note is moved to the middle of the range of ticks where the level still plays out the same, so the chart is as forgiving as possible.
+
+   Clean up and Center are skipped in exact replay mode (used when rolling back to saved states isn't exact on a level), and both stop early when their share of the time runs out (together at most 3/4 of the time limit, at least 30 s).
 6. **Final check.** The finished chart is replayed from a clean restart with nothing skipped. If the cleaned-up chart fails, the original verified chart is used instead. A chart that fails its final check is never saved as complete.
 
 Only one level can be simulated at a time: Geometry Dash's engine runs a level on one thread, and running extra copies of the game in the background would put your save file and other mods at risk. The speed comes from the smarter search instead.
@@ -69,9 +71,9 @@ Only one level can be simulated at a time: Geometry Dash's engine runs a level o
 ## Importing
 
 - **Rhythm Path charts** (`.rpchart`, or the older `.txt` charts), for example one exported from another computer.
-- **GDR macros** (`.gdr` and `.gdr.json`, the format used by xdBot and other 2.2 bots). Only jump inputs are used.
+- **GDR macros** (`.gdr` and `.gdr.json`, the format used by xdBot and other 2.2 bots). Only jump inputs are used. On 2-player levels, xdBot macros are mapped to players the way xdBot plays them back; on 1-player levels every input goes to P1.
 
-Imported inputs are replayed in the real game first. If they fail at some point, the working part is kept and the solver finds the rest ("Fix imported inputs that fail").
+Imported inputs are replayed in the real game first, with nothing skipped. If they fail at some point, the working part is kept and the solver finds the rest ("Fix imported inputs that fail"). An import always covers the whole level (the "Up to %" field only applies to solving), and it doesn't touch saved solve progress.
 
 ## Settings
 
@@ -80,10 +82,10 @@ Everything is in the mod's settings (Geode → Rhythm Path → Settings, or **Cu
 | Group | Examples |
 |---|---|
 | General | Show the menu on level open, auto-solve, show the chart |
-| Solver | Time limit, solving screen frame rate (60 by default), ship/wave precision, clean-up, holds instead of repeated clicks, centering |
+| Solver | Time limit, solving screen frame rate (60 by default; the solver works for about 85% of each frame), ship/wave precision, clean-up, holds instead of repeated clicks, centering |
 | Human-playable timing | Shortest ship/wave hold and gap, other modes |
 | When the chart shows | Default percent range |
-| Look | Theme (Clean, Neon, Pastel, Mono, Classic) or custom colors, note shape, glow, key markers, lane labels |
+| Look | Theme (Clean, Neon, Pastel, Mono, Classic) or custom colors (their alpha sets how see-through the notes are), note shape, glow, key markers, lane labels |
 | Layout | Horizontal or vertical, position (including custom), length, lane size, timing line position, scroll speed and direction, P2 lane, swap lanes |
 | Translucency | Lane and note opacity, fade out when idle |
 | Feedback | Judgements, combo, accuracy, hold judging, timing windows, visual offset |

@@ -45,7 +45,7 @@
 		"time-limit": {
 			"type": "int",
 			"name": "Time limit (seconds)",
-			"description": "Time allowed for finding a path in one go. Progress is saved, so you can resume later with more time. Cleaning up and centering the inputs afterwards can take up to 3/4 of this time again, plus a final replay.",
+			"description": "Time allowed for finding a path in one go. Progress is saved, so you can resume later with more time. Cleaning up and centering the inputs afterwards take at most 3/4 of this time again (at least 30 s), plus a final replay.",
 			"default": 600,
 			"min": 10,
 			"max": 7200
@@ -53,7 +53,7 @@
 		"solver-fps": {
 			"type": "int",
 			"name": "Solving screen frame rate",
-			"description": "How smooth the solving screen is. The solver works between frames, so a lower frame rate gives it slightly more time; 60 keeps the game responsive.",
+			"description": "Frame rate to keep while solving. The solver simulates for about 85% of each frame, based on this frame rate or the game's own FPS cap, whichever is lower. Lower values give the solver a little more time; 60 keeps the game responsive.",
 			"default": 60,
 			"min": 10,
 			"max": 240,
@@ -92,19 +92,19 @@
 		"optimize-inputs": {
 			"type": "bool",
 			"name": "Clean up the inputs",
-			"description": "After a path is found, remove clicks that aren't needed and shorten taps to the length that actually matters, so the chart has as few notes as possible.",
+			"description": "After a path is found, remove clicks that aren't needed and shorten taps to the length that actually matters, so the chart has as few notes as possible. Skipped in exact replay mode, and stops early if it runs out of time.",
 			"default": true
 		},
 		"prefer-holds": {
 			"type": "bool",
 			"name": "Prefer holding over repeated clicks",
-			"description": "When holding the button through a section plays exactly the same as clicking repeatedly (for example a cube jumping on every landing), use one hold note instead.",
+			"description": "When holding the button plays exactly the same as clicking again and again (for example a cube jumping on every landing), use one hold note instead. For every mode except ship and wave, which use the next setting.",
 			"default": true
 		},
 		"merge-gap-ms": {
 			"type": "float",
 			"name": "Join ship/wave inputs closer than (ms)",
-			"description": "While cleaning up, try to join two ship or wave holds separated by a gap shorter than this into one hold, if the level still plays the same.",
+			"description": "While cleaning up, try to join two ship or wave holds separated by a gap shorter than this into one hold, if the level still plays the same. 0 turns this off.",
 			"default": 40.0,
 			"min": 0.0,
 			"max": 200.0,
@@ -117,7 +117,7 @@
 		"refine-timing": {
 			"type": "bool",
 			"name": "Center inputs in their timing window",
-			"description": "After a path is found, move every press and release to the middle of the range of ticks that still works, so the chart is as forgiving as possible.",
+			"description": "After a path is found, move every note to the middle of the range of ticks that still works, so the chart is as forgiving as possible. Skipped in exact replay mode, and stops early if it runs out of time.",
 			"default": true
 		},
 		"refine-window": {
@@ -529,7 +529,8 @@
 				"arrows": true,
 				"arrow-step": 0.5
 			},
-			"enable-if": "idle-fade"
+			"enable-if": "idle-fade",
+			"description": "Fade once this long has passed since the last note and no note is about to scroll in."
 		},
 		"section-feedback": {
 			"type": "title",

@@ -109,7 +109,7 @@ public:
 
     void start(SolveRequest request);
     void cancel(bool resetLevel);
-    void saveProgress();
+    bool saveProgress();
 
     Phase phase() const { return m_phase; }
     bool running() const;

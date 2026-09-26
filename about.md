@@ -8,7 +8,7 @@ A menu shows the chart saved for this level (per level ID and start position) an
 
 - **Play** the saved chart, **Export** it or **Delete** it.
 - **Solve** the level, or **Resume** a solve that was stopped.
-- **Import** a chart or a GDR bot macro (.gdr / .gdr.json).
+- **Import** a chart or a GDR bot macro (.gdr / .gdr.json). Imports are checked in the real game and fixed by the solver where they fail.
 - Choose the **percent range** where the chart is shown.
 
 ## How it solves
