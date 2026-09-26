@@ -136,6 +136,7 @@ private:
     double m_stepCostUs = 30.0;
     double m_cpCostUs = 250.0;
     bool m_finalIsRefined = false;
+    bool m_replayFallbackUsed = false;
 
     int m_stepsPerUpdate = 2;
     int m_inputResolution = 1;
@@ -243,6 +244,7 @@ private:
     void beginSearchFresh();
     void handleSearchDeath();
     void dfsBacktrack(int failNode);
+    bool trySearchFallback();
     void onSearchSuccess();
     void beginVerify(std::vector<uint8_t> seq, Phase phase);
     void onVerifySuccess();

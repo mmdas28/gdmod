@@ -213,6 +213,7 @@ void Solver::start() {
     m_sawHalfTick = false;
     m_fastAllowed = false;
     m_finalIsRefined = false;
+    m_replayFallbackUsed = false;
     setLayerHidden(true);
 
     log::info(
@@ -702,6 +703,7 @@ void Solver::handleSearchDeath() {
     if (m_path.size() > m_best.size()) m_best = heldOf(m_path);
     failNode = std::min(failNode, static_cast<int>(m_path.size()) - 1);
     if (failNode < 0) {
+        if (trySearchFallback()) return;
         m_failReason = "the level kills the player before any input can help";
         finish(false, m_best, false, false, false);
         return;
@@ -727,13 +729,37 @@ void Solver::dfsBacktrack(int failNode) {
         m_dead.insert(m_path.back().hash);
         m_path.pop_back();
         if (m_maxTick - t > m_maxBacktrackTicks) {
+            if (trySearchFallback()) return;
             m_failReason = "stuck: no working input found for this section";
             finish(false, m_best, false, false, false);
             return;
         }
     }
+    if (trySearchFallback()) return;
     m_failReason = "no possible path was found";
     finish(false, m_best, false, false, false);
+}
+
+bool Solver::trySearchFallback() {
+    if (timeUp()) return false;
+    std::vector<uint8_t> best = m_best;
+    float percent = m_maxPercent;
+    if (m_fastAllowed) {
+        log::warn("Solver: no path found with fast simulation, searching again in full mode");
+        m_fastAllowed = false;
+    }
+    else if (m_restoreMode == RestoreMode::Checkpoint && !m_replayFallbackUsed) {
+        log::warn("Solver: no path found with checkpoint rollback, searching again in exact replay mode");
+        m_replayFallbackUsed = true;
+        m_restoreMode = RestoreMode::Replay;
+    }
+    else {
+        return false;
+    }
+    beginSearchFresh();
+    m_best = std::move(best);
+    m_maxPercent = percent;
+    return true;
 }
 
 void Solver::onSearchSuccess() {
