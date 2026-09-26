@@ -21,6 +21,7 @@ public:
     void onChartChanged();
     void onLevelReset();
     void onInput(int lane, bool down, double levelTime);
+    void onCancelSolve(cocos2d::CCObject* sender);
 
 private:
     struct Style {
@@ -57,6 +58,7 @@ private:
     cocos2d::CCLabelBMFont* m_status = nullptr;
     cocos2d::CCLabelBMFont* m_detail = nullptr;
     cocos2d::CCLabelBMFont* m_hint = nullptr;
+    cocos2d::CCMenu* m_panelMenu = nullptr;
     geode::Ref<cocos2d::CCLabelBMFont> m_judgeLabels[kLaneCount];
     std::string m_statusText;
     std::string m_detailText;

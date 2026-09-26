@@ -60,21 +60,6 @@ struct StatSnapshot {
     int layerClicks = 0;
 };
 
-struct ProbeState {
-    bool active = false;
-    bool running = false;
-    int deathTick = 0;
-    int failNode = 0;
-    int target = 0;
-    int floor = 0;
-    int cand = 0;
-    int maskIndex = 0;
-    uint8_t held = 0;
-    int bestCand = -1;
-    uint8_t bestHeld = 0;
-    int bestReach = 0;
-};
-
 struct RefineNote {
     int lane = 0;
     int start = 0;
@@ -110,6 +95,7 @@ public:
     void onLevelComplete();
 
     std::string statusLine() const;
+    double elapsed() const { return elapsedSeconds(); }
     std::string detailLine() const;
     float progress() const;
 
@@ -146,9 +132,7 @@ private:
 
     bool m_fastAllowed = false;
     bool m_layerHidden = false;
-    bool m_layerWasVisible = true;
-    ProbeState m_probe;
-    int m_dfsUntil = -1;
+    std::vector<std::pair<geode::Ref<cocos2d::CCNode>, bool>> m_hiddenChildren;
     double m_stepCostUs = 30.0;
     double m_cpCostUs = 250.0;
     bool m_finalIsRefined = false;
@@ -216,8 +200,6 @@ private:
     uint64_t m_totalSteps = 0;
     uint64_t m_backtracks = 0;
     uint64_t m_prunes = 0;
-    uint64_t m_probeRuns = 0;
-    uint64_t m_greedyCommits = 0;
 
     StatSnapshot m_stats;
     std::string m_key;
@@ -261,11 +243,6 @@ private:
     void beginSearchFresh();
     void handleSearchDeath();
     void dfsBacktrack(int failNode);
-    void startProbe(int deathTick, int failNode);
-    void nextProbeCandidate();
-    void commitProbe(int cand, uint8_t held);
-    void finishProbeWithoutSuccess();
-    bool advanceProbe();
     void onSearchSuccess();
     void beginVerify(std::vector<uint8_t> seq, Phase phase);
     void onVerifySuccess();

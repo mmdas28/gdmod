@@ -16,9 +16,6 @@ constexpr int kVerifyGraceTicks = 480;
 constexpr size_t kMaxDeadStates = 6'000'000;
 constexpr int kMaxVerifyFailures = 12;
 constexpr int kRepairRewindTicks = 120;
-constexpr int kProbeWindow = 120;
-constexpr int kProbeMargin = 120;
-constexpr int kDfsSpan = 240;
 constexpr int kFastTestTicks = 480;
 
 uint8_t seqAt(std::vector<uint8_t> const& seq, int tick) {
@@ -121,20 +118,28 @@ bool Solver::fastModeNow() const {
 void Solver::setLayerHidden(bool hidden) {
     if (!m_layer) return;
     if (hidden) {
-        if (!m_layerHidden) {
-            m_layerWasVisible = m_layer->isVisible();
-            m_layerHidden = true;
+        if (m_layerHidden) return;
+        m_layerHidden = true;
+        m_hiddenChildren.clear();
+        auto children = m_layer->getChildren();
+        if (!children) return;
+        for (auto child : CCArrayExt<CCNode*>(children)) {
+            if (!child || child == m_layer->m_uiLayer) continue;
+            m_hiddenChildren.emplace_back(child, child->isVisible());
+            child->setVisible(false);
         }
-        if (m_layer->isVisible()) m_layer->setVisible(false);
     }
     else if (m_layerHidden) {
         m_layerHidden = false;
-        m_layer->setVisible(m_layerWasVisible);
+        for (auto& [child, visible] : m_hiddenChildren) {
+            if (child) child->setVisible(visible);
+        }
+        m_hiddenChildren.clear();
     }
 }
 
 void Solver::onPause() {
-    if (m_layer && m_layerHidden) m_layer->setVisible(m_layerWasVisible);
+    setLayerHidden(false);
 }
 
 void Solver::updateCheckpointInterval() {
@@ -207,10 +212,6 @@ void Solver::start() {
     m_failReason.clear();
     m_sawHalfTick = false;
     m_fastAllowed = false;
-    m_probe = ProbeState{};
-    m_dfsUntil = -1;
-    m_probeRuns = 0;
-    m_greedyCommits = 0;
     m_finalIsRefined = false;
     setLayerHidden(true);
 
@@ -498,20 +499,6 @@ void Solver::beforeStep(bool halfTick) {
             break;
         }
         case Phase::Search: {
-            if (m_probe.running) {
-                if (t < m_probe.cand) {
-                    applyHeld(m_path[t].held);
-                    break;
-                }
-                if (t > m_probe.cand && m_dead.contains(stateHash(t))) {
-                    m_pendingDeath = true;
-                    m_prunedAt = t;
-                    m_stopDecisions = true;
-                    break;
-                }
-                applyHeld(m_probe.held);
-                break;
-            }
             if (t < static_cast<int>(m_path.size())) {
                 applyHeld(m_path[t].held);
                 break;
@@ -596,19 +583,20 @@ bool Solver::advanceSelfTest() {
     if (m_selfTestStage == 0) {
         bool ended = m_pendingDeath || m_success || m_tick >= kFastTestTicks;
         if (!ended) {
-            if (m_selfTestCpTick < 0 && m_tick >= kSelfTestCheckpointTick) {
+            if (m_selfTestCpTick == -1 && m_tick >= kSelfTestCheckpointTick) {
                 createCheckpointHere();
-                m_selfTestCpTick = m_tick;
+                m_selfTestCpTick = m_checkpoints.contains(m_tick) ? m_tick : -2;
             }
             return simulate();
         }
         m_selfTestDied = m_pendingDeath;
         m_selfTestLength = m_pendingDeath ? m_deathTick : (m_success ? m_successTick : m_tick);
         clearStepFlags();
-        if (m_selfTestCpTick >= 0 && m_selfTestLength > m_selfTestCpTick + 8) {
+        auto cp = m_checkpoints.find(m_selfTestCpTick);
+        if (cp != m_checkpoints.end() && m_selfTestLength > m_selfTestCpTick + 8) {
             m_selfTestStage = 1;
             m_selfTestMismatch = -1;
-            loadCheckpoint(m_checkpoints.at(m_selfTestCpTick));
+            loadCheckpoint(cp->second);
             return true;
         }
         log::info("Solver self-test: restore check skipped (player dies at tick {} without input)", m_selfTestLength);
@@ -677,7 +665,6 @@ void Solver::beginSearchFresh() {
 }
 
 bool Solver::advanceSearch() {
-    if (m_probe.running) return advanceProbe();
     if (m_pendingDeath) {
         handleSearchDeath();
         return running();
@@ -704,7 +691,6 @@ bool Solver::advanceSearch() {
 
 void Solver::handleSearchDeath() {
     bool pruned = m_prunedAt >= 0;
-    int deathTick = pruned ? m_prunedAt : m_deathTick;
     int failNode = pruned ? m_prunedAt - 1 : m_deathTick;
     if (pruned) m_prunes++;
     clearStepFlags();
@@ -714,10 +700,6 @@ void Solver::handleSearchDeath() {
     if (failNode < 0) {
         m_failReason = "the level kills the player before any input can help";
         finish(false, m_best, false, false, false);
-        return;
-    }
-    if (m_restoreMode == RestoreMode::Checkpoint && deathTick >= m_dfsUntil) {
-        startProbe(deathTick, failNode);
         return;
     }
     dfsBacktrack(failNode);
@@ -748,94 +730,6 @@ void Solver::dfsBacktrack(int failNode) {
     }
     m_failReason = "no possible path was found";
     finish(false, m_best, false, false, false);
-}
-
-void Solver::startProbe(int deathTick, int failNode) {
-    m_probe = ProbeState{};
-    m_probe.active = true;
-    m_probe.deathTick = deathTick;
-    m_probe.failNode = failNode;
-    m_probe.target = deathTick + kProbeMargin;
-    m_probe.floor = std::max(0, failNode - kProbeWindow + 1);
-    m_probe.cand = failNode;
-    m_probe.maskIndex = 0;
-    m_probe.bestReach = deathTick;
-    m_probe.bestCand = -1;
-    nextProbeCandidate();
-}
-
-void Solver::nextProbeCandidate() {
-    static constexpr uint8_t kDualMasks[3] = {1, 2, 3};
-    m_probe.running = false;
-    while (m_probe.cand >= m_probe.floor && m_probe.cand >= 0) {
-        auto const& node = m_path[m_probe.cand];
-        int count = node.optionCount >= 4 ? 3 : (node.optionCount >= 2 ? 1 : 0);
-        if (m_probe.maskIndex >= count) {
-            m_probe.cand--;
-            m_probe.maskIndex = 0;
-            continue;
-        }
-        uint8_t mask = count == 3 ? kDualMasks[m_probe.maskIndex] : 1;
-        m_probe.maskIndex++;
-        uint8_t held = static_cast<uint8_t>(node.held ^ mask);
-        if (node.tried & (1u << held)) continue;
-        m_probe.held = held;
-        m_probe.running = true;
-        m_probeRuns++;
-        restoreTo(m_probe.cand);
-        return;
-    }
-    finishProbeWithoutSuccess();
-}
-
-bool Solver::advanceProbe() {
-    if (m_pendingDeath) {
-        int reach = m_prunedAt >= 0 ? m_prunedAt : m_deathTick;
-        clearStepFlags();
-        if (reach > m_probe.bestReach) {
-            m_probe.bestReach = reach;
-            m_probe.bestCand = m_probe.cand;
-            m_probe.bestHeld = m_probe.held;
-        }
-        nextProbeCandidate();
-        return running();
-    }
-    if (m_success || m_tick >= m_probe.target) {
-        clearStepFlags();
-        commitProbe(m_probe.cand, m_probe.held);
-        return running();
-    }
-    if (timeUp()) {
-        m_probe = ProbeState{};
-        m_failReason = "time limit reached";
-        std::vector<uint8_t> best = m_best.size() > m_path.size() ? m_best : heldOf(m_path);
-        finish(false, best, false, false, false);
-        return false;
-    }
-    return simulate();
-}
-
-void Solver::commitProbe(int cand, uint8_t held) {
-    m_probe = ProbeState{};
-    m_greedyCommits++;
-    m_path.resize(static_cast<size_t>(cand) + 1);
-    auto& node = m_path[cand];
-    uint8_t original = node.held;
-    node.tried = static_cast<uint8_t>((node.tried & ~(1u << original)) | (1u << held));
-    node.held = held;
-    restoreTo(cand);
-}
-
-void Solver::finishProbeWithoutSuccess() {
-    int deathTick = m_probe.deathTick;
-    int failNode = m_probe.failNode;
-    if (m_probe.bestCand >= 0 && m_probe.bestReach > deathTick) {
-        commitProbe(m_probe.bestCand, m_probe.bestHeld);
-        return;
-    }
-    m_probe = ProbeState{};
-    m_dfsUntil = deathTick + kDfsSpan;
-    dfsBacktrack(failNode);
 }
 
 void Solver::onSearchSuccess() {
@@ -904,6 +798,7 @@ void Solver::onVerifySuccess() {
 void Solver::onVerifyFailed(int tick) {
     m_pendingDeath = false;
     m_stopDecisions = false;
+    m_maxPercent = std::min(m_maxPercent, m_layer->getCurrentPercent());
 
     if (m_phase == Phase::FinalVerify) {
         if (m_finalIsRefined) {
@@ -912,14 +807,20 @@ void Solver::onVerifyFailed(int tick) {
             beginVerify(m_verifiedSeq, Phase::FinalVerify);
             return;
         }
-        if (!m_fastAllowed) {
-            m_tickTimes = m_verifiedTimes;
-            finish(true, m_verifiedSeq, true, true, false);
+        if (m_fastAllowed) {
+            log::warn("Solver: fast simulation disagreed with the full game at tick {}, solving again in full mode", tick);
+            m_fastAllowed = false;
+            m_verifyFailures++;
+            if (m_verifyFailures > kMaxVerifyFailures || timeUp()) {
+                m_failReason = "the found path did not replay reliably";
+                size_t keep = std::min<size_t>(static_cast<size_t>(std::max(tick, 0)), m_verifiedSeq.size());
+                finish(false, std::vector<uint8_t>(m_verifiedSeq.begin(), m_verifiedSeq.begin() + keep), true, false, false);
+                return;
+            }
+            beginSearchFresh();
             return;
         }
-        log::warn("Solver: fast simulation disagreed with the full game at tick {}, re-solving that part in full mode", tick);
-        m_fastAllowed = false;
-        m_dead.clear();
+        log::warn("Solver: chart failed the clean full-game check at tick {}", tick);
         m_phase = Phase::Verify;
         m_seq = m_verifiedSeq;
     }
@@ -940,8 +841,8 @@ void Solver::onVerifyFailed(int tick) {
     }
     if (m_verifyFailures >= 2) m_dead.clear();
 
-    int rewind = std::max(0, tick - kRepairRewindTicks);
-    if (static_cast<int>(m_path.size()) > rewind) m_path.resize(static_cast<size_t>(rewind));
+    int rewind = std::clamp(tick - kRepairRewindTicks, 0, static_cast<int>(m_path.size()));
+    m_path.resize(static_cast<size_t>(rewind));
     m_maxTick = rewind;
     m_phase = Phase::Search;
     restoreTo(rewind);
@@ -1191,7 +1092,6 @@ void Solver::finish(bool success, std::vector<uint8_t> const& seq, bool verified
 
 void Solver::cleanup() {
     releaseAllCheckpoints();
-    m_probe = ProbeState{};
     if (m_layer) {
         m_layer->m_clickBetweenSteps = m_savedClickBetweenSteps;
         restoreStats();
@@ -1222,8 +1122,8 @@ std::string Solver::detailLine() const {
     double elapsed = std::max(0.001, elapsedSeconds());
     double speed = (static_cast<double>(m_totalSteps) / 240.0) / elapsed;
     std::string out = fmt::format(
-        "{:.1f}s  |  {:.0f}x game speed  |  {} probes  |  {} backtracks",
-        elapsed, speed, m_probeRuns, m_backtracks
+        "{:.1f}s  |  {:.0f}x game speed  |  {} backtracks  |  {} pruned",
+        elapsed, speed, m_backtracks, m_prunes
     );
     if (m_verifyFailures > 0) out += fmt::format("  |  {} re-checks", m_verifyFailures);
     if (m_restoreMode == RestoreMode::Replay) out += "  |  exact replay mode";

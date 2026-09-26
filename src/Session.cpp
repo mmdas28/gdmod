@@ -2,6 +2,8 @@
 
 #include "Overlay.hpp"
 
+#include <Geode/ui/Notification.hpp>
+
 using namespace geode::prelude;
 
 namespace rp {
@@ -73,7 +75,23 @@ void tickSession(Session& s) {
     }
 
     if (s.solver && s.solver->finished()) {
-        if (s.solver->hasResult()) s.chart = s.solver->result();
+        if (s.solver->hasResult()) {
+            s.chart = s.solver->result();
+            auto const& chart = *s.chart;
+            size_t notes = chart.lanes[0].size() + chart.lanes[1].size();
+            if (chart.complete) {
+                Notification::create(
+                    fmt::format("Chart ready: {} notes, solved in {:.1f}s", notes, s.solver->elapsed()),
+                    NotificationIcon::Success
+                )->show();
+            }
+            else {
+                Notification::create(
+                    fmt::format("Partial chart: reaches {:.0f}%", chart.reachedPercent),
+                    NotificationIcon::Warning
+                )->show();
+            }
+        }
         s.lastSolverStatus = s.solver->statusLine();
         s.solver.reset();
         if (auto overlay = s.getOverlay()) overlay->onChartChanged();

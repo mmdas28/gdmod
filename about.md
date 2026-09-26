@@ -4,8 +4,8 @@ Rhythm Path works out how to beat a level, then shows every input as a scrolling
 
 ## How it works
 
-1. **Solve.** When you open a level, the mod hides it and plays it in the background using only the game's own physics, many times faster than real time. When the player dies, it rewinds a moment and tries changing the input at each tick just before the death. If no single change works, it searches every combination and remembers states that always lead to death.
-2. **Verify.** The path it finds is replayed from a clean restart. The final check runs through the normal game loop with nothing skipped. If the replay differs anywhere, that section is searched again.
+1. **Solve.** When you open a level, the mod hides it and plays it in the background using only the game's own physics, many times faster than real time. When the player dies, it rolls back and tries a different input, working back through every combination if it has to. It remembers states that always lead to death so it never retries them.
+2. **Verify.** The path it finds is replayed from a clean restart. The final check runs every per-frame function (nothing skipped). If the replay differs anywhere, that section is searched again.
 3. **Center.** Every press is moved to the middle of the range of ticks that still works, so the chart gives you the largest margin for error.
 4. **Play.** The level restarts and the chart scrolls toward the blue timing line. Press when a note's head reaches the line and hold until its tail reaches it.
 
@@ -15,6 +15,7 @@ The chart reads the game's own level clock at render time, so it has no extra de
 
 - **Pause menu → Solve / Re-solve / Cancel solve**
 - **Pause menu → Chart: ON/OFF**
+- **Cancel** on the solving screen stops a solve (it works on touch devices too).
 - Everything else (scroll speed, lane size, position, colours, solver limits) is in the mod settings.
 
 ## Notes

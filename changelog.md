@@ -1,8 +1,9 @@
 # v1.1.0
 
 - Much faster solving. While solving, the level is hidden and only the physics runs, after a self-test confirms this matches the full game. The progress screen shows the speed.
-- New greedy "probe" search: one input change per obstacle is tried before falling back to the full search.
-- Final full-game check before a chart is saved.
+- Final full-game check (nothing skipped) before a chart is saved. A chart that fails it is never marked complete. If fast simulation disagrees with the full game, the level is solved again in full mode.
+- Cancel button on the solving screen, and a notification when a chart is ready.
+- Fixes: progress no longer shows 100% after a failed check; verification repairs stay aligned with the found path; the self-test no longer assumes its checkpoint was created; the pause button keeps working while solving.
 - One-click installers (Windows `.bat`, macOS/Linux `.sh`) are published on GitHub Releases. The Windows installer also installs Geode if it's missing.
 
 # v1.0.0

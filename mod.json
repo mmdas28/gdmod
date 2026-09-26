@@ -38,7 +38,7 @@
 		"steps-per-update": {
 			"type": "int",
 			"name": "Physics steps per simulated frame",
-			"description": "How many 240 TPS physics steps the solver runs per simulated frame. Higher is faster. The final check always replays the whole level through the normal game loop.",
+			"description": "How many 240 TPS physics steps the solver runs per simulated game frame. 4 matches playing at 60 FPS, 1 matches 240 FPS. Lower is more faithful to high-FPS play, higher solves faster. The final check uses the same value.",
 			"default": 4,
 			"min": 1,
 			"max": 8

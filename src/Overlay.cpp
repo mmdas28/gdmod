@@ -66,6 +66,16 @@ bool RhythmOverlay::init() {
         this->addChild(label, 3);
     }
 
+    auto cancelSprite = ButtonSprite::create("Cancel", "goldFont.fnt", "GJ_button_06.png", 0.8f);
+    cancelSprite->setScale(0.7f);
+    auto cancelButton = CCMenuItemSpriteExtra::create(cancelSprite, this, menu_selector(RhythmOverlay::onCancelSolve));
+    cancelButton->setID("cancel-solve"_spr);
+    m_panelMenu = CCMenu::create();
+    m_panelMenu->addChild(cancelButton);
+    m_panelMenu->setPosition({0.f, 0.f});
+    m_panelMenu->setVisible(false);
+    this->addChild(m_panelMenu, 5);
+
     refreshStyle();
     return true;
 }
@@ -109,6 +119,14 @@ void RhythmOverlay::hideAllText() {
     m_status->setVisible(false);
     m_detail->setVisible(false);
     m_hint->setVisible(false);
+    m_panelMenu->setVisible(false);
+}
+
+void RhythmOverlay::onCancelSolve(CCObject*) {
+    auto s = session();
+    if (!s || !s->solving()) return;
+    s->solver->cancel(true);
+    s->lastSolverStatus = "Solver cancelled";
 }
 
 void RhythmOverlay::drawRect(float x0, float y0, float x1, float y1, ccColor4F const& color) {
@@ -181,9 +199,14 @@ void RhythmOverlay::drawSolverPanel(Solver const& solver) {
     m_detail->setScale(0.6f);
     m_detail->setPosition({win.width / 2.f, win.height * 0.40f});
 
-    setText(m_hint, m_hintText, "Rhythm Path is playing the level in the background. Pause to cancel.");
+    setText(m_hint, m_hintText, "Rhythm Path is simulating the level in the background.");
     m_hint->setScale(0.55f);
     m_hint->setPosition({win.width / 2.f, win.height * 0.34f});
+
+    m_panelMenu->setVisible(true);
+    if (auto button = m_panelMenu->getChildByID("cancel-solve"_spr)) {
+        button->setPosition({win.width / 2.f, win.height * 0.22f});
+    }
 }
 
 void RhythmOverlay::drawEmptyBox(std::string const& message) {
