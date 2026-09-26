@@ -346,8 +346,16 @@ function ConvertTo-PsLiteral([string]$Text) {
     return "[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$b64'))"
 }
 
+function Test-IsAdmin {
+    try {
+        return ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch {
+        return $false
+    }
+}
+
 function Restart-Elevated([string]$Gd) {
-    if ($env:RP_ELEVATED -eq '1') {
+    if ($env:RP_ELEVATED -eq '1' -or (Test-IsAdmin)) {
         Stop-Install ("Windows refused to write to $Gd even with administrator rights. " +
             'Make sure the folder is not read-only and that your antivirus (for example Controlled folder access) is not blocking it.')
     }
@@ -708,7 +716,8 @@ function Invoke-Main {
     $title = 'Rhythm Path'
     if ($payload.Version) { $title = "Rhythm Path $($payload.Version)" }
     Write-Info "Mod: $title ($($payload.Id))"
-    if ($env:RP_ELEVATED -eq '1') { Write-Info 'Running with administrator rights.' }
+    $elevated = ($env:RP_ELEVATED -eq '1') -or (Test-IsAdmin)
+    if ($elevated) { Write-Info 'Running with administrator rights.' }
 
     $gd = Select-GDFolder
     Write-Ok "Geometry Dash folder: $gd"
@@ -749,7 +758,6 @@ function Invoke-Main {
         }
     }
 
-    $elevated = ($env:RP_ELEVATED -eq '1')
     $granted = $true
     try {
         if ($needGeode) { Install-Geode $gd $payload.MinGeode }
