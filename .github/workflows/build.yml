@@ -18,6 +18,10 @@ jobs:
         - name: macOS
           os: macos-latest
 
+        - name: iOS
+          os: macos-latest
+          target: iOS
+
         - name: Android64
           os: ubuntu-latest
           target: Android64
@@ -85,7 +89,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          HEAD_SHA="$(git ls-remote origin "$GITHUB_REF" 2>/dev/null | awk -v r="$GITHUB_REF" '$2 == r { print $1; exit }')"
+          HEAD_SHA="$(git ls-remote origin "$GITHUB_REF" 2>/dev/null | awk -v r="$GITHUB_REF" '$2 == r { print $1; exit }' || true)"
           if [ -z "$HEAD_SHA" ]; then
             HEAD_SHA="$(gh api "repos/$GH_REPO/git/ref/heads/$GITHUB_REF_NAME" --jq .object.sha 2>/dev/null || true)"
           fi
