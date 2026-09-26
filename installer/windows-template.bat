@@ -381,6 +381,7 @@ function Save-Url([string]$Url, [string]$Path, [string]$Label) {
             $res = $req.GetResponse()
             try {
                 $total = $res.ContentLength
+                if ($total -le 0) { Write-Info "Downloading $Label..." }
                 $in = $res.GetResponseStream()
                 $out = [IO.File]::Create($Path)
                 try {
