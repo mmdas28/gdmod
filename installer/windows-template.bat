@@ -3,6 +3,7 @@ setlocal
 set "RP_SELF=%~f0"
 set "RP_GD=%~1"
 set "RP_ELEVATED="
+set "RP_SID="
 title Rhythm Path installer
 set "RP_PS=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
 if not exist "%RP_PS%" set "RP_PS=powershell.exe"
@@ -354,8 +355,11 @@ function Restart-Elevated([string]$Gd) {
     Write-Caution "Windows did not allow writing to: $Gd"
     Write-Info 'This happens when Geometry Dash is in a protected folder such as Program Files.'
     Write-Info 'Windows will now ask for administrator permission. The install then continues in a new window.'
+    Write-Info 'That window also gives your Windows account write access to the folder, which Geode needs every time the game starts.'
+    $sid = ''
+    try { $sid = [string][Security.Principal.WindowsIdentity]::GetCurrent().User.Value } catch { }
     $loader = 'trap{Write-Host $_ -ForegroundColor Red;[void](Read-Host ''Press Enter to close'');exit 1};$t=[IO.File]::ReadAllText($env:RP_SELF);$a=$t.IndexOf(''#RP''+''PS#'');$b=$t.IndexOf(''#RP''+''DATA#'');& ([ScriptBlock]::Create($t.Substring($a,$b-$a)))'
-    $boot = '$env:RP_SELF={0};$env:RP_GD={1};$env:RP_ELEVATED=''1'';{2}' -f (ConvertTo-PsLiteral $Self), (ConvertTo-PsLiteral $Gd), $loader
+    $boot = '$env:RP_SELF={0};$env:RP_GD={1};$env:RP_SID={2};$env:RP_ELEVATED=''1'';{3}' -f (ConvertTo-PsLiteral $Self), (ConvertTo-PsLiteral $Gd), (ConvertTo-PsLiteral $sid), $loader
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($boot))
     $exe = $null
     try { $exe = (Get-Process -Id $PID).Path } catch { }
@@ -368,6 +372,33 @@ function Restart-Elevated([string]$Gd) {
     }
     Write-Ok 'Continuing in the administrator window. This window will close.'
     Start-Sleep -Seconds 3
+}
+
+function Grant-UserAccess([string]$Gd) {
+    $ErrorActionPreference = 'Continue'
+    $sid = [string]$env:RP_SID
+    if ($sid -notmatch '^S-1-[0-9]+(-[0-9]+)+$') { $sid = 'S-1-5-32-545' }
+    $target = $Gd.TrimEnd('\', '/')
+    if ($target -match '^[A-Za-z]:$') { $target += '\' }
+    $icacls = Join-Path (Get-SystemDir) 'icacls.exe'
+    if (-not (Test-File $icacls)) { $icacls = 'icacls.exe' }
+    Write-Step 'Giving your Windows account write access to the Geometry Dash folder'
+    Write-Info 'Geode writes to this folder every time the game starts. This can take a moment...'
+    $code = -1
+    $out = ''
+    try {
+        $out = (& $icacls $target '/grant' ('*{0}:(OI)(CI)M' -f $sid) '/T' '/C' '/Q' 2>&1 | Out-String).Trim()
+        $code = $LASTEXITCODE
+    } catch {
+        $out = $_.Exception.Message
+    }
+    if ($code -eq 0) {
+        Write-Ok 'Folder permissions updated.'
+        return $true
+    }
+    Write-Caution "Windows could not update the permissions of $Gd (icacls exit code $code)."
+    if ($out) { foreach ($l in @($out -split "`r?`n" | Select-Object -Last 3)) { Write-Caution $l } }
+    return $false
 }
 
 function Save-Url([string]$Url, [string]$Path, [string]$Label) {
@@ -626,20 +657,47 @@ function Install-ModFile([string]$ModsDir, $Payload) {
     return $final
 }
 
-function Start-GD([string]$Gd) {
-    try {
-        Start-Process "steam://rungameid/$SteamAppId"
-        Write-Ok 'Starting Geometry Dash through Steam...'
-        return
-    } catch { }
-    $exe = Join-Path $Gd 'GeometryDash.exe'
-    try {
-        if (-not (Test-File $exe)) { throw 'GeometryDash.exe not found' }
-        Start-Process -FilePath $exe -WorkingDirectory $Gd
-        Write-Ok 'Starting Geometry Dash...'
-    } catch {
-        Write-Caution 'Could not start Geometry Dash automatically. Start it from Steam.'
+function Test-SteamProtocol {
+    try { return [bool](Test-Path -LiteralPath 'Registry::HKEY_CLASSES_ROOT\steam\shell\open\command') } catch { return $false }
+}
+
+function Test-SteamCopy([string]$Gd) {
+    if (-not (Test-SteamProtocol)) { return $false }
+    try { $key = [IO.Path]::GetFullPath($Gd).TrimEnd('\', '/') } catch { return $false }
+    foreach ($lib in @(Get-SteamLibraries)) {
+        try { $p = [IO.Path]::GetFullPath((Join-Path $lib 'steamapps\common\Geometry Dash')).TrimEnd('\', '/') } catch { continue }
+        if ([string]::Equals($p, $key, [StringComparison]::OrdinalIgnoreCase)) { return $true }
     }
+    return $false
+}
+
+function Get-GDExe([string]$Gd) {
+    $main = Join-Path $Gd 'GeometryDash.exe'
+    if (Test-File $main) { return $main }
+    $exes = @(Get-ChildItem -LiteralPath $Gd -Filter '*.exe' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike 'GeodeUpdater*' })
+    if ($exes.Count -eq 1) { return $exes[0].FullName }
+    return $null
+}
+
+function Start-GD([string]$Gd) {
+    if (Test-SteamCopy $Gd) {
+        try {
+            Start-Process "steam://rungameid/$SteamAppId"
+            Write-Ok 'Starting Geometry Dash through Steam...'
+            return
+        } catch { }
+    }
+    $exe = Get-GDExe $Gd
+    if ($exe) {
+        try {
+            $psi = New-Object Diagnostics.ProcessStartInfo -Property @{ FileName = $exe; WorkingDirectory = $Gd; UseShellExecute = $true }
+            $proc = [Diagnostics.Process]::Start($psi)
+            if ($proc) { $proc.Dispose() }
+            Write-Ok 'Starting Geometry Dash...'
+            return
+        } catch { }
+    }
+    Write-Caution "Could not start Geometry Dash automatically. Start it the way you usually do (it is in $Gd)."
 }
 
 function Invoke-Main {
@@ -691,18 +749,34 @@ function Invoke-Main {
         }
     }
 
-    if ($needGeode) { Install-Geode $gd $payload.MinGeode }
+    $elevated = ($env:RP_ELEVATED -eq '1')
+    $granted = $true
+    try {
+        if ($needGeode) { Install-Geode $gd $payload.MinGeode }
 
-    Write-Step "Installing $title"
-    Wait-GDClosed
-    $final = Install-ModFile $modsDir $payload
-    Write-Ok "Installed and verified: $final"
+        Write-Step "Installing $title"
+        Wait-GDClosed
+        $final = Install-ModFile $modsDir $payload
+        Write-Ok "Installed and verified: $final"
+    } finally {
+        if ($elevated) { $granted = Grant-UserAccess $gd }
+    }
+    if (-not $granted) {
+        Stop-Install ("$title was copied, but your Windows account still cannot write to $gd, so Geode cannot load it. " +
+            'Move Geometry Dash to a Steam library outside Program Files (Steam > Settings > Storage), then run this installer again.')
+    }
 
     Write-Host ''
     Write-Host "  Done! $title is installed." -ForegroundColor Green
     if ($needGeode) { Write-Host '  The first start with Geode can take a little longer than usual.' }
     Write-Host ''
-    if (Confirm-Choice 'Start Geometry Dash now?' $true) { Start-GD $gd }
+    if ($elevated) {
+        Write-Host '  Start Geometry Dash from Steam as usual once this window is closed.'
+        Write-Host ''
+        [void](Read-Answer 'Press Enter to close')
+    } elseif (Confirm-Choice 'Start Geometry Dash now?' $true) {
+        Start-GD $gd
+    }
 }
 
 try {

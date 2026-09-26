@@ -28,6 +28,9 @@ jobs:
 
     name: ${{ matrix.config.name }}
     runs-on: ${{ matrix.config.os }}
+    concurrency:
+      group: build-${{ github.ref }}-${{ matrix.config.name }}
+      cancel-in-progress: true
 
     steps:
       - uses: actions/checkout@v7
@@ -82,6 +85,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          HEAD_SHA="$(git ls-remote origin "$GITHUB_REF" 2>/dev/null | awk -v r="$GITHUB_REF" '$2 == r { print $1; exit }')"
+          if [ -z "$HEAD_SHA" ]; then
+            HEAD_SHA="$(gh api "repos/$GH_REPO/git/ref/heads/$GITHUB_REF_NAME" --jq .object.sha 2>/dev/null || true)"
+          fi
+          if [ -z "$HEAD_SHA" ]; then
+            echo "::error::Could not look up the current commit of $GITHUB_REF_NAME, so the release was not updated."
+            exit 1
+          fi
+          if [ "$HEAD_SHA" != "$GITHUB_SHA" ]; then
+            echo "::notice::Release not updated: $GITHUB_REF_NAME now points to $HEAD_SHA, not to this run's commit $GITHUB_SHA."
+            exit 0
+          fi
           VERSION="$(jq -r .version mod.json)"
           TAG="v${VERSION#v}"
           MOD_ID="$(jq -r .id mod.json)"
@@ -91,7 +106,12 @@ jobs:
 
           Close Geometry Dash first.
 
-          **Windows:** download **RhythmPath-Installer-Windows.bat** below and double-click it. It finds Geometry Dash, installs Geode if it is missing, and installs the mod. If Windows says "Windows protected your PC", click **More info**, then **Run anyway**.
+          **Windows:** download **RhythmPath-Installer-Windows.bat** below and double-click it. It finds Geometry Dash, installs Geode if it is missing, and installs the mod.
+
+          - If your browser warns about the download, choose **Keep** (in Edge: **...** > **Keep**, then **Show more** > **Keep anyway**).
+          - If Windows says "Windows protected your PC", click **More info**, then **Run anyway**.
+          - If Windows blocks the file without a **Run anyway** button (Smart App Control), right-click it > **Properties** > tick **Unblock** > **OK**, then double-click it again.
+          - Or install by hand: copy **__MOD_ID__.geode** into the `geode\mods` folder inside your Geometry Dash folder (Geode must already be installed: https://geode-sdk.org/install).
 
           **macOS / Linux:** download **RhythmPath-Installer-macOS-Linux.sh**, then run it from a terminal:
 
