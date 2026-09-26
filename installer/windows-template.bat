@@ -156,7 +156,7 @@ function Get-SteamLibraries {
             try { $content = [IO.File]::ReadAllText($vdf) } catch { continue }
             foreach ($m in [regex]::Matches($content, '"(?:path|\d+)"\s+"([^"\r\n]+)"')) {
                 $p = $m.Groups[1].Value -replace '\\\\', '\'
-                if ($p -match '^(?:[A-Za-z]:\\|\\\\)') { $libs.Add($p) }
+                if ($p -match '^(?:[A-Za-z]:\\|\\\\)' -and (Test-Dir $p)) { $libs.Add($p) }
             }
         }
     }
@@ -177,7 +177,7 @@ function Resolve-GDCandidate([string]$Path) {
     if (Test-File $full) { $full = [IO.Path]::GetDirectoryName($full) }
     $tries = New-Object System.Collections.Generic.List[string]
     foreach ($sub in @('', 'Geometry Dash', 'common\Geometry Dash', 'steamapps\common\Geometry Dash')) {
-        if ($sub) { $tries.Add((Join-Path $full $sub)) } else { $tries.Add($full) }
+        if ($sub) { $tries.Add([IO.Path]::Combine($full, $sub)) } else { $tries.Add($full) }
     }
     $up = $full
     for ($i = 0; $i -lt 3; $i++) {
@@ -267,7 +267,7 @@ function Request-GDFolder {
             }
         }
         if (-not $picked) {
-            $picked = Read-Answer 'Paste the full path of your Geometry Dash folder (or press Enter to cancel):'
+            $picked = Read-Answer 'Paste the full path of your Geometry Dash folder (or press Enter to cancel)'
             if (-not $picked) { Stop-Install 'No Geometry Dash folder was chosen, so nothing was installed.' }
         }
         $gd = Resolve-GDCandidate $picked
