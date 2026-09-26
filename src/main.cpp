@@ -50,13 +50,19 @@ class $modify(RPPlayLayer, PlayLayer) {
     }
 
     void onQuit() {
-        if (auto s = rpSession()) s->shutdown();
+        if (auto s = rpSession()) {
+            if (auto solver = runningSolver(s)) solver->saveProgress();
+            s->shutdown();
+        }
         PlayLayer::onQuit();
     }
 
     void onExit() {
         if (auto s = rpSession()) {
-            if (auto solver = runningSolver(s)) solver->cancel(false);
+            if (auto solver = runningSolver(s)) {
+                solver->saveProgress();
+                solver->cancel(false);
+            }
         }
         PlayLayer::onExit();
     }
@@ -119,7 +125,12 @@ class $modify(RPPlayLayer, PlayLayer) {
     }
 
     void pauseGame(bool unfocused) {
-        if (auto solver = runningSolver(rpSession())) solver->onPause();
+        auto s = rpSession();
+        if (s && s->frozen()) return;
+        if (auto solver = runningSolver(s)) {
+            solver->onPause();
+            solver->saveProgress();
+        }
         PlayLayer::pauseGame(unfocused);
     }
 
@@ -153,6 +164,10 @@ class $modify(RPBaseGameLayer, GJBaseGameLayer) {
         if (s->solver && s->solver->isStepping()) return GJBaseGameLayer::update(dt);
 
         rp::tickSession(*s);
+        if (s->frozen()) {
+            if (!m_queuedButtons.empty()) m_queuedButtons.clear();
+            return;
+        }
         if (auto solver = runningSolver(s)) {
             solver->runFrame();
             return;
@@ -195,6 +210,7 @@ class $modify(RPBaseGameLayer, GJBaseGameLayer) {
             if (solver->isInjecting()) GJBaseGameLayer::handleButton(down, button, isPlayer1);
             return;
         }
+        if (s->frozen()) return;
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
         if (button == 1) {
             if (auto overlay = s->getOverlay()) overlay->onInput(isPlayer1 ? 0 : 1, down, m_gameState.m_levelTime);
@@ -212,12 +228,14 @@ class $modify(RPPauseLayer, PauseLayer) {
         auto menu = CCMenu::create();
         menu->setID("menu"_spr);
 
-        const char* solveText = s->solving() ? "Cancel solve" : (s->chart ? "Re-solve" : "Solve");
-        auto solveSprite = ButtonSprite::create(solveText, "goldFont.fnt", "GJ_button_01.png", 0.8f);
-        solveSprite->setScale(0.6f);
-        auto solveButton = CCMenuItemSpriteExtra::create(solveSprite, this, menu_selector(RPPauseLayer::onRhythmSolve));
-        solveButton->setID("solve-button"_spr);
-        menu->addChild(solveButton);
+        bool solving = s->solving();
+        auto mainSprite = ButtonSprite::create(
+            solving ? "Cancel solve" : "Rhythm Path", "goldFont.fnt", solving ? "GJ_button_06.png" : "GJ_button_01.png", 0.8f
+        );
+        mainSprite->setScale(0.6f);
+        auto mainButton = CCMenuItemSpriteExtra::create(mainSprite, this, menu_selector(RPPauseLayer::onRhythmMenu));
+        mainButton->setID(solving ? "cancel-solve-button"_spr : "menu-button"_spr);
+        menu->addChild(mainButton);
 
         bool show = Mod::get()->getSettingValue<bool>("show-overlay");
         auto chartSprite = ButtonSprite::create(show ? "Chart: ON" : "Chart: OFF", "goldFont.fnt", "GJ_button_04.png", 0.8f);
@@ -231,23 +249,27 @@ class $modify(RPPauseLayer, PauseLayer) {
         this->addChild(menu, 20);
     }
 
-    void onRhythmSolve(CCObject*) {
+    void onRhythmMenu(CCObject*) {
         auto s = rp::session();
         if (!s || !s->layer) return;
+        auto layer = s->layer;
         if (auto solver = runningSolver(s)) {
             solver->cancel(false);
-            s->lastSolverStatus = "Solver cancelled";
+            rp::cancelSolve(*s);
             PauseLayer::onResume(nullptr);
-            s->layer->resetLevel();
+            layer->resetLevel();
             return;
         }
-        rp::requestSolve(*s);
         PauseLayer::onResume(nullptr);
+        if (rp::session() == s) rp::openLevelMenu(*s);
     }
 
     void onRhythmToggle(CCObject* sender) {
         bool show = !Mod::get()->getSettingValue<bool>("show-overlay");
         Mod::get()->setSettingValue<bool>("show-overlay", show);
+        if (auto s = rp::session()) {
+            if (show && s->overlay) s->overlay->setVisible(true);
+        }
         if (auto item = typeinfo_cast<CCMenuItemSpriteExtra*>(sender)) {
             if (auto sprite = typeinfo_cast<ButtonSprite*>(item->getNormalImage())) {
                 sprite->setString(show ? "Chart: ON" : "Chart: OFF");

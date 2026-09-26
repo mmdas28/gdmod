@@ -12,7 +12,7 @@ public:
     void refresh();
 
 protected:
-    bool init();
+    bool init() override;
     void onClose(cocos2d::CCObject* sender) override;
 };
 

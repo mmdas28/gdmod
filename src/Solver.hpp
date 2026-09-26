@@ -141,10 +141,20 @@ public:
 private:
     using Clock = std::chrono::steady_clock;
 
+    enum class RefineStage { Baseline, Test };
+    enum class OptStep { Remove, Join, Shorten, Finished };
+    enum class EditKind { Remove, Join, Shorten };
+
+    struct LadderStep {
+        int tier = 2;
+        bool constraints = false;
+    };
+
     PlayLayer* m_layer = nullptr;
     LevelRef m_ref;
     SolveRequest m_request;
     Phase m_phase = Phase::Idle;
+    Phase m_stoppedPhase = Phase::Idle;
     RestoreMode m_restoreMode = RestoreMode::Checkpoint;
 
     bool m_inStep = false;
@@ -156,6 +166,7 @@ private:
     bool m_twoPlayer = false;
     bool m_savedClickBetweenSteps = false;
     bool m_muted = false;
+    float m_targetPercent = 100.f;
 
     bool m_diedThisStep = false;
     bool m_completedThisStep = false;
@@ -173,16 +184,33 @@ private:
     std::vector<std::pair<geode::Ref<cocos2d::CCNode>, bool>> m_hiddenChildren;
     double m_stepCostUs = 30.0;
     double m_cpCostUs = 250.0;
-    bool m_finalIsRefined = false;
+    bool m_finalIsEdited = false;
     bool m_replayFallbackUsed = false;
     bool m_replayFromRepair = false;
+    bool m_importChecking = false;
+    bool m_resumed = false;
+    bool m_saveOnFailure = true;
 
-    int m_stepsPerUpdate = 2;
+    int m_stepsPerUpdate = 4;
     int m_inputResolution = 1;
-    int m_frameBudgetMs = 14;
+    double m_frameBudgetMs = 14.0;
     int m_timeLimitSec = 600;
     bool m_refineEnabled = true;
     int m_refineWindow = 20;
+    bool m_optimizeEnabled = true;
+    bool m_preferHolds = true;
+    double m_mergeGapMs = 40.0;
+    int m_minHold[3] = {1, 1, 1};
+    int m_minRelease[3] = {1, 1, 1};
+    bool m_relaxTiming = true;
+    int m_startTier = 0;
+    bool m_constraintsActive = false;
+    int m_constraintCap = 1;
+
+    std::vector<LadderStep> m_ladder;
+    int m_level = 0;
+    int m_escalatedAt = 0;
+    int m_finestTier = -1;
 
     int m_searchCpInterval = 8;
     int m_denseWindow = 1440;
@@ -196,6 +224,8 @@ private:
     std::vector<uint8_t> m_best;
     int m_maxTick = 0;
     float m_maxPercent = 0.f;
+    std::vector<uint8_t> m_laneModes;
+    std::vector<std::pair<uintptr_t, uint32_t>> m_objectIndex;
 
     std::vector<uint8_t> m_seq;
     std::vector<uint8_t> m_verifiedSeq;
@@ -212,7 +242,6 @@ private:
     bool m_selfTestDied = false;
     int m_fastMismatch = -1;
 
-    enum class RefineStage { Baseline, Test };
     std::vector<RefineNote> m_refineNotes;
     size_t m_refineIndex = 0;
     RefineStage m_refineStage = RefineStage::Baseline;
@@ -231,15 +260,42 @@ private:
     int m_negBad = 0;
     bool m_confirmingShift = false;
     int m_refineMoved = 0;
+    bool m_refineRan = false;
     bool m_runConverged = false;
     std::vector<uint8_t> m_testSeq;
 
+    std::vector<RefineNote> m_optNotes;
+    OptStep m_optStep = OptStep::Finished;
+    EditKind m_editKind = EditKind::Remove;
+    int m_optCursorStart = -1;
+    int m_optCursorLane = -1;
+    int m_optLo = 0;
+    int m_optHi = 0;
+    int m_optTestEnd = 0;
+    int m_optBestConverged = -1;
+    bool m_optShortenReady = false;
+    bool m_baseValid = false;
+    int m_baseChangeEnd = 0;
+    int m_testChangeFrom = 0;
+    int m_optEdits = 0;
+    size_t m_optPosition = 0;
+
     Clock::time_point m_startTime;
     Clock::time_point m_refineDeadline;
+    Clock::time_point m_optDeadline;
     Clock::time_point m_lastLog;
+    Clock::time_point m_lastSave;
+    Clock::time_point m_speedTime;
+    double m_elapsedOffset = 0.0;
+    double m_frozenElapsed = -1.0;
+    double m_recentSpeed = 0.0;
+    uint64_t m_speedSteps = 0;
     uint64_t m_totalSteps = 0;
     uint64_t m_backtracks = 0;
     uint64_t m_prunes = 0;
+    uint64_t m_lastSaveSteps = 0;
+    Phase m_lastSavePhase = Phase::Idle;
+    bool m_lastSaveValid = false;
 
     StatSnapshot m_stats;
     std::string m_key;
@@ -248,17 +304,37 @@ private:
     std::string m_failReason;
 
     void readSettings();
+    void buildLadder();
+    void buildObjectIndex();
+    std::string settingsSignature() const;
     void captureStats();
     void restoreStats();
+    double runSeconds() const;
     double elapsedSeconds() const;
     bool timeUp() const;
+    void updateSpeed(Clock::time_point now);
 
     void setMuted(bool muted);
     void inject(int lane, bool down);
     void applyHeld(uint8_t held);
     void releaseAll();
+
+    LadderStep const& currentStep() const;
+    bool canEscalate() const;
+    void escalate();
+    void deescalate();
+    uint64_t portalKey(PlayerObject* player) const;
+    uint64_t hashState(int tick, int tier, bool constraints) const;
     uint64_t stateHash(int tick) const;
-    uint8_t optionCountNow() const;
+    uint64_t exactHash(int tick) const;
+    int sinceChange(int tick, int lane) const;
+    int requiredTicks(uint8_t family, bool held) const;
+    uint8_t laneModesNow() const;
+    uint8_t laneModesAt(int tick) const;
+    void recordLaneModes(int tick, uint8_t modes);
+    void policyAt(int tick, uint8_t modes, uint8_t& def, uint8_t& flips) const;
+    uint8_t seedFlips(int tick) const;
+    void seedPath(std::vector<uint8_t> const& seq, int length);
     bool fastModeNow() const;
     void setLayerHidden(bool hidden);
     void updateCheckpointInterval();
@@ -270,6 +346,7 @@ private:
     void createCheckpointHere();
     void thinCheckpoints();
     void releaseCheckpointsAfter(int tick);
+    void releaseCheckpointsBetween(int after, int before);
     void releaseAllCheckpoints();
     void loadCheckpoint(SavedCheckpoint const& cp);
     void restoreTo(int tick);
@@ -278,8 +355,11 @@ private:
     bool advanceSelfTest();
     bool advanceSearch();
     bool advanceVerify();
+    bool advanceOptimize();
     bool advanceRefine();
 
+    void beginAfterSelfTest();
+    void resumeFrom(SolveProgress const& progress);
     void beginSearchFresh();
     void handleSearchDeath();
     void dfsBacktrack(int failNode);
@@ -289,16 +369,40 @@ private:
     void onVerifySuccess();
     void onVerifyFailed(int tick);
 
+    void beginOptimize();
+    void nextOptNote();
+    bool nextOptTest();
+    bool launchOptTest(EditKind kind, std::vector<uint8_t> seq, int changeFrom, int changeTo);
+    bool startOptBaseline();
+    bool startTestRun();
+    void onOptTestResult(bool good);
+    void applyOptEdit(std::vector<uint8_t> seq, int changedFrom, int convergedAt);
+    void finishOptimize();
+    int findOptNote(int start, int lane) const;
+    int firstOptNoteAfter(int start, int lane) const;
+    int nextOptNoteInLane(int index) const;
+    bool joinAllowed(RefineNote const& note, RefineNote const& next) const;
+    bool continuousAt(int lane, int tick) const;
+    int editRequirement(int lane, int tick, bool held) const;
+    int laneViolations(std::vector<uint8_t> const& seq, int lane, int from, int to) const;
+    bool editBreaksTiming(std::vector<uint8_t> const& edited, int lane, int from, int to) const;
+
     void beginRefine();
     void startRefineNote();
     void beginRefineTest(int shift);
     void nextRefineTest();
     void applyRefineShift(int shift);
+    bool shiftBreaksTiming(RefineNote const& note, int shift) const;
     std::vector<uint8_t> shiftedSeq(RefineNote const& note, int shift) const;
 
+    void startFinalCheck();
+    void finishSuccess(std::vector<uint8_t> seq);
+    bool sequenceViolatesTiming(std::vector<uint8_t> const& seq) const;
+    bool existingChartIsBetter(Chart const& chart) const;
     std::vector<uint8_t> heldOf(std::vector<SearchNode> const& path) const;
     void finish(bool success, std::vector<uint8_t> const& seq, bool verified, bool complete, bool refined);
     void cleanup();
+    std::string phaseNote() const;
 };
 
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Geode/Geode.hpp>
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <type_traits>
@@ -234,17 +235,25 @@ inline uint64_t quantize(double v, double scale) {
     return static_cast<uint64_t>(static_cast<int64_t>(std::llround(v * scale)));
 }
 
-inline uint64_t hashPlayer(PlayerObject* p) {
+inline bool usesCoarsePrecision(PlayerObject* p) {
+    return p && (p->m_isShip || p->m_isDart || p->m_isBird || p->m_isSwing);
+}
+
+inline uint64_t hashPlayer(PlayerObject* p, int tier, uint64_t portalKey) {
     if (!p) return 0;
-    uint64_t h = 1469598103934665603ull;
+    tier = std::clamp(tier, 0, 2);
+    bool coarse = tier < 2 && usesCoarsePrecision(p);
+    double yScale = coarse ? (tier == 0 ? 2.0 : 10.0) : 1000.0;
+    double vScale = coarse ? (tier == 0 ? 20.0 : 100.0) : 1000.0;
+    uint64_t h = mixHash(1469598103934665603ull, static_cast<uint64_t>(tier));
     auto nodePos = p->getPosition();
     h = mixHash(h, quantize(nodePos.x, 1000.0));
-    h = mixHash(h, quantize(nodePos.y, 1000.0));
+    h = mixHash(h, quantize(nodePos.y, yScale));
     h = mixHash(h, quantize(p->m_position.x, 1000.0));
-    h = mixHash(h, quantize(p->m_position.y, 1000.0));
+    h = mixHash(h, quantize(p->m_position.y, yScale));
     h = mixHash(h, quantize(p->m_positionX, 1000.0));
-    h = mixHash(h, quantize(p->m_positionY, 1000.0));
-    h = mixHash(h, quantize(p->m_yVelocity, 1000.0));
+    h = mixHash(h, quantize(p->m_positionY, yScale));
+    h = mixHash(h, quantize(p->m_yVelocity, vScale));
     h = mixHash(h, quantize(p->m_vehicleSize, 1000.0));
     h = mixHash(h, quantize(p->m_playerSpeed, 1000.0));
     h = mixHash(h, quantize(p->m_gravityMod, 1000.0));
@@ -271,11 +280,15 @@ inline uint64_t hashPlayer(PlayerObject* p) {
     push(p->m_hasEverJumped);
     h = mixHash(h, flags);
     h = mixHash(h, static_cast<uint64_t>(p->m_stateJumpBuffered));
-    h = mixHash(h, reinterpret_cast<uintptr_t>(p->m_lastActivatedPortal));
+    h = mixHash(h, portalKey);
     h = mixHash(h, static_cast<uint64_t>(p->m_touchedRings.size()));
     h = mixHash(h, static_cast<uint64_t>(p->m_ringRelatedSet.size()));
     h = mixHash(h, static_cast<uint64_t>(p->m_jumpPadRelated.size()));
     return h;
+}
+
+inline uint64_t hashPlayer(PlayerObject* p, int tier) {
+    return hashPlayer(p, tier, p ? static_cast<uint64_t>(reinterpret_cast<uintptr_t>(p->m_lastActivatedPortal)) : 0);
 }
 
 }

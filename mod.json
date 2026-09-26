@@ -45,7 +45,7 @@
 		"time-limit": {
 			"type": "int",
 			"name": "Time limit (seconds)",
-			"description": "Time allowed for finding a path in one go. Progress is saved, so you can resume later with more time. Optimizing and centering the inputs afterwards can take up to half this long again.",
+			"description": "Time allowed for finding a path in one go. Progress is saved, so you can resume later with more time. Cleaning up and centering the inputs afterwards can take up to 3/4 of this time again, plus a final replay.",
 			"default": 600,
 			"min": 10,
 			"max": 7200
