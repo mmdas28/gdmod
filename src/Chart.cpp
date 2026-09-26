@@ -116,6 +116,9 @@ std::string levelKey(PlayLayer* layer) {
             h = fnv1a(name, h);
         }
     }
+    if (layer->m_levelSettings && layer->m_levelSettings->m_twoPlayerMode) {
+        h = fnv1a(GameManager::sharedState()->getGameVariable("0010") ? "flip:1" : "flip:0", h);
+    }
     if (auto sp = layer->m_startPosObject) {
         auto pos = sp->getPosition();
         h = fnv1a(fmt::format("sp:{:.3f},{:.3f}", pos.x, pos.y), h);

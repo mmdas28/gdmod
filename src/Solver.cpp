@@ -663,6 +663,7 @@ void Solver::beginSearchFresh() {
     m_dead.clear();
     m_best.clear();
     m_maxTick = 0;
+    m_maxPercent = 0.f;
     m_phase = Phase::Search;
     if (m_restoreMode == RestoreMode::Checkpoint) createCheckpointHere();
 }
@@ -814,13 +815,17 @@ void Solver::onVerifyFailed(int tick) {
             log::warn("Solver: fast simulation disagreed with the full game at tick {}, solving again in full mode", tick);
             m_fastAllowed = false;
             m_verifyFailures++;
+            size_t keep = std::min<size_t>(static_cast<size_t>(std::max(tick, 0)), m_verifiedSeq.size());
+            std::vector<uint8_t> verifiedPrefix(m_verifiedSeq.begin(), m_verifiedSeq.begin() + keep);
+            float verifiedPercent = m_maxPercent;
             if (m_verifyFailures > kMaxVerifyFailures || timeUp()) {
                 m_failReason = "the found path did not replay reliably";
-                size_t keep = std::min<size_t>(static_cast<size_t>(std::max(tick, 0)), m_verifiedSeq.size());
-                finish(false, std::vector<uint8_t>(m_verifiedSeq.begin(), m_verifiedSeq.begin() + keep), true, false, false);
+                finish(false, verifiedPrefix, true, false, false);
                 return;
             }
             beginSearchFresh();
+            m_best = std::move(verifiedPrefix);
+            m_maxPercent = verifiedPercent;
             return;
         }
         log::warn("Solver: chart failed the clean full-game check at tick {}", tick);

@@ -175,8 +175,8 @@ void RhythmOverlay::visit() {
         return;
     }
 
-    double now = layer->m_gameState.m_levelTime + m_style.visualOffset;
-    drawChart(*s, *s->chart, now);
+    double gameTime = layer->m_gameState.m_levelTime;
+    drawChart(*s, *s->chart, gameTime + m_style.visualOffset, gameTime);
     CCNode::visit();
 }
 
@@ -224,10 +224,10 @@ void RhythmOverlay::drawEmptyBox(std::string const& message) {
     m_hint->setPosition({g.x0 + g.width / 2.f, g.y0 + g.height / 2.f});
 }
 
-void RhythmOverlay::drawChart(Session& session, Chart const& chart, double now) {
+void RhythmOverlay::drawChart(Session& session, Chart const& chart, double now, double gameTime) {
     syncJudgeState(chart);
-    if (m_lastTime < 0.0 || now + 1e-9 < m_lastTime) rewindJudgeState(chart, now);
-    m_lastTime = now;
+    if (m_lastTime < 0.0 || gameTime + 1e-9 < m_lastTime) rewindJudgeState(chart, gameTime);
+    m_lastTime = gameTime;
 
     int laneCount = (chart.twoPlayer || m_style.alwaysShowP2) ? 2 : 1;
     computeGeometry(laneCount);
@@ -313,7 +313,7 @@ void RhythmOverlay::drawChart(Session& session, Chart const& chart, double now) 
         m_hint->setVisible(false);
     }
 
-    if (m_style.judgements && !session.layer->m_player1->m_isDead) detectMisses(chart, now);
+    if (m_style.judgements && !session.layer->m_player1->m_isDead) detectMisses(chart, gameTime);
 }
 
 void RhythmOverlay::syncJudgeState(Chart const& chart) {

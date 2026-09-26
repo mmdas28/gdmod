@@ -78,7 +78,7 @@ private:
     void hideAllText();
 
     void drawSolverPanel(Solver const& solver);
-    void drawChart(Session& session, Chart const& chart, double now);
+    void drawChart(Session& session, Chart const& chart, double now, double gameTime);
     void drawEmptyBox(std::string const& message);
     void drawRect(float x0, float y0, float x1, float y1, cocos2d::ccColor4F const& color);
 

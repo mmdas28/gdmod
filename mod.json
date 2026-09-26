@@ -30,7 +30,7 @@
 		"time-limit": {
 			"type": "int",
 			"name": "Solver time limit (seconds)",
-			"description": "Give up after this long and keep the furthest path found.",
+			"description": "Time allowed for finding a path. After this the solver keeps the furthest path found. Centering the timings afterwards can take up to half this long again (at least 30 s), plus a final replay.",
 			"default": 600,
 			"min": 10,
 			"max": 7200
@@ -46,7 +46,7 @@
 		"input-resolution": {
 			"type": "int",
 			"name": "Input resolution (ticks)",
-			"description": "The solver may only change an input every N physics ticks (240 per second) while searching. 1 finds the most solutions; 2-4 searches faster. Timing refinement still places every note on the exact best tick afterwards.",
+			"description": "The solver may only change an input every N physics ticks (240 per second) while searching. 1 finds the most solutions; 2-4 search faster. If \"Center inputs in their timing window\" is on, each note is then moved to the middle of its working range, tick by tick (skipped in exact replay mode).",
 			"default": 1,
 			"min": 1,
 			"max": 8
