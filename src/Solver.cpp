@@ -237,7 +237,10 @@ void Solver::cancel(bool resetLevel) {
     cleanup();
     m_failReason = "cancelled";
     m_phase = Phase::Failed;
-    if (resetLevel) resetToStart();
+    if (resetLevel) {
+        resetToStart();
+        m_layer->m_resumeTimer = 1;
+    }
 }
 
 void Solver::runFrame() {

@@ -137,6 +137,7 @@ void RhythmOverlay::drawRect(float x0, float y0, float x1, float y1, ccColor4F c
 
 void RhythmOverlay::visit() {
     m_draw->clear();
+    m_panelMenu->setVisible(false);
     if (++m_styleAge > 30) {
         refreshStyle();
         m_styleAge = 0;
