@@ -2,11 +2,14 @@
 
 #include "Chart.hpp"
 #include "PlayerState.hpp"
+#include "SolverProgress.hpp"
+#include "Storage.hpp"
 
 #include <Geode/Geode.hpp>
 #include <chrono>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -18,6 +21,7 @@ enum class Phase {
     SelfTest,
     Search,
     Verify,
+    Optimize,
     Refine,
     FinalVerify,
     Done,
@@ -27,6 +31,34 @@ enum class Phase {
 enum class RestoreMode {
     Checkpoint,
     Replay,
+};
+
+enum class SolveKind {
+    Fresh,
+    Resume,
+    CheckImport,
+};
+
+struct SolveRequest {
+    SolveKind kind = SolveKind::Fresh;
+    std::vector<uint8_t> importSeq;
+    bool repairImport = true;
+    std::optional<SolveProgress> progress;
+    float targetPercent = 100.f;
+    ChartInfo info;
+};
+
+struct SolverView {
+    Phase phase = Phase::Idle;
+    std::string title;
+    std::string detail;
+    std::string note;
+    float progress = 0.f;
+    float percent = 0.f;
+    double elapsed = 0.0;
+    double gameSpeed = 0.0;
+    int stepIndex = 0;
+    std::vector<std::string> steps;
 };
 
 struct SavedCheckpoint {
@@ -43,7 +75,8 @@ struct SearchNode {
     uint64_t hash = 0;
     uint8_t held = 0;
     uint8_t tried = 0;
-    uint8_t optionCount = 2;
+    uint8_t def = 0;
+    uint8_t flips = 0;
 };
 
 struct StatSnapshot {
@@ -68,14 +101,15 @@ struct RefineNote {
 
 class Solver {
 public:
-    explicit Solver(PlayLayer* layer);
+    Solver(PlayLayer* layer, LevelRef ref);
     ~Solver();
 
     Solver(Solver const&) = delete;
     Solver& operator=(Solver const&) = delete;
 
-    void start();
+    void start(SolveRequest request);
     void cancel(bool resetLevel);
+    void saveProgress();
 
     Phase phase() const { return m_phase; }
     bool running() const;
@@ -94,10 +128,12 @@ public:
     void onPlayerDestroyed();
     void onLevelComplete();
 
+    SolverView view() const;
     std::string statusLine() const;
-    double elapsed() const { return elapsedSeconds(); }
     std::string detailLine() const;
     float progress() const;
+    double elapsed() const { return elapsedSeconds(); }
+    std::string const& failReason() const { return m_failReason; }
 
     Chart const& result() const { return m_result; }
     bool hasResult() const { return m_hasResult; }
@@ -106,6 +142,8 @@ private:
     using Clock = std::chrono::steady_clock;
 
     PlayLayer* m_layer = nullptr;
+    LevelRef m_ref;
+    SolveRequest m_request;
     Phase m_phase = Phase::Idle;
     RestoreMode m_restoreMode = RestoreMode::Checkpoint;
 

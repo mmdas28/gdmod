@@ -1,17 +1,17 @@
 # Rhythm Path
 
-A [Geode](https://geode-sdk.org) mod for Geometry Dash 2.2081. It finds a way through a level by itself, then turns the inputs into a scrolling rhythm-game chart:
+A [Geode](https://geode-sdk.org) mod for Geometry Dash 2.2081. It finds a way through a level by itself, then turns the inputs into a scrolling rhythm-game chart you play along to:
 
 ```
-┌─┃────────────────────────────────┐
-│ ┃     ▌━━━      ▌━━━━━━       P1 │
-├─┃────────────────────────────────┤
-│ ┃            ▌━━              P2 │
-└─┃────────────────────────────────┘
-  ↑ timing line (blue)   notes scroll ←
+╭─┃──────────────────────────────────╮
+│ ◉     ●━━━━━      ●     ●━━━━   P1 │
+├─┃──────────────────────────────────┤
+│ ◉            ●━━          ●     P2 │
+╰─┃──────────────────────────────────╯
+  ↑ timing line          notes scroll ←
 ```
 
-Each note is a hold. Press when its head reaches the blue line and release when its tail reaches it. Short taps are just very short holds.
+Press when a note's head reaches the timing line. Long notes are holds: keep holding until the tail reaches the line. On 2-player levels the second lane is the P2 button. There is also a vertical, FNF-style layout.
 
 ## Install (one click)
 
@@ -27,44 +27,73 @@ If Windows shows "Windows protected your PC", click **More info → Run anyway**
 
 The repository is private, so only GitHub accounts with access to it can open the release page and download the installers.
 
-## Use
+## The level menu
 
-- Open any classic (non-platformer) level. If no chart is saved for it, the mod solves it right away. The level is hidden and simulated as fast as your CPU allows, many times faster than real time (the progress screen shows the speed). It restarts the level when it's done. Easy and medium levels usually take a few seconds; hard levels take longer.
-- You can also use the pause menu:
-  - **Solve / Re-solve** runs the solver again.
-  - **Cancel solve** stops a running solve. The solving screen also has its own **Cancel** button.
-  - **Chart: ON/OFF** shows or hides the overlay.
-- Charts are saved in the mod's save folder (`charts/`), one per level and start position. Editing the level makes it solve again.
-- While you play, each press is rated PERFECT / GREAT / GOOD / EARLY / LATE with the error in ms. Notes you don't press show MISS. 1 tick = 1/240 s ≈ 4.2 ms.
+When you open a level, the Rhythm Path menu appears and the level waits until you pick something:
 
-## How the solver works
+- **Saved chart**: the chart saved for this level, if there is one: whether it's complete, how many notes, how long it took, when it was saved. It also warns you if the level was updated since. **Play**, **Export** or **Delete** it.
+- **Solve**: find a path now. If an earlier solve was stopped, **Resume** continues from its saved progress (or **Start over**). **Up to %** lets you solve only part of the level.
+- **Import**: load a chart file or a bot macro (see below). It is replayed in the real game to check it, cleaned up, and saved as this level's chart.
+- **Show chart from / to %**: only show the chart in part of the level (for practising a section). Turn on **This level only** to keep a range just for this level. Otherwise the defaults from the settings apply.
+- **Customize** opens the mod's settings (Geode's own settings screen). **Play without chart** closes the menu.
 
-- **Fast simulation.** While solving, the level isn't drawn, and per-frame visual work (object fading and colours, particles, shaders, progress bar) is skipped. Only the game's own physics step runs, many times per frame. At the start, a self-test plays the opening of the level both ways and compares the results tick by tick. Fast mode is only used if they match.
-- **Search.** A complete depth-first search over the button state at every physics tick (240 per second). The player keeps its current input and only changes it when that input leads to death. On a death, it rolls back to a saved state and tries the other input at the latest tick first. States that always lead to death are hashed and never retried, which keeps the search small. If the search runs out of options, it doesn't give up straight away. It first tries again from the start with fast simulation off, then once more in exact replay mode, because a slightly inaccurate rollback can make a solvable level look impossible. The cost is that a level with no possible path usually runs until the time limit instead of stopping early. (A greedy "change one input and see" shortcut was tried and dropped: in simulation tests it was slower than this search.)
-- **Exact state.** It restores the game's own practice checkpoint plus about 170 extra player fields that practice checkpoints normally drop (velocities, slope and collision state, jump buffers, held buttons, orb and pad sets). At the start it runs a self-test comparing a restored run with a straight run. If they differ right away, it uses exact replay from the start instead.
-- **Verify.** The finished path is replayed from a clean level restart. If it dies anywhere, the search resumes a little before that point, using states saved during the clean run. After repeated mismatches it switches to exact replay mode.
-- **Center.** When "Center inputs in their timing window" is on, each note is shifted earlier and later, tick by tick (binary search), to find the range where the level still plays out the same. The note is then moved to the middle of that range. This step is skipped in exact replay mode, and stops early if it runs out of time.
-- **Final check.** When fast simulation was used or notes were moved, the finished chart is replayed once more from a clean restart with every per-frame function running (nothing skipped), using the same physics steps per frame. If the centered chart fails, the uncentered one is checked. If fast simulation turns out to disagree with the full game, the level is solved again with fast simulation off. A chart that fails its final check is never saved as complete.
-- **Sync.** The overlay places notes with `levelTime` read from the game's own state when it draws. It never keeps its own clock, so there is no drift and no frame of lag.
+You can open the menu again from the pause menu (**Rhythm Path**). Turn off **Show on level open** if you'd rather use the pause menu only. Then **Auto-solve when the menu is off** decides whether levels without a chart are solved automatically.
 
-## Settings worth knowing
+Charts are saved per level ID (local levels by name) in the mod's save folder: `levels/<level id>/`. Each start position gets its own chart, and so does each "Flip 2-player controls" setting on 2-player levels.
 
-| Setting | Default | What it does |
-|---|---|---|
-| Solver time limit | 600 s | Time allowed for finding a path. After this it keeps the furthest path found and shows how far the chart reaches. Centering afterwards can take up to half this long again (at least 30 s), plus a final replay. |
-| Physics steps per simulated frame | 4 | Physics steps per simulated game frame. 4 matches playing at 60 FPS, 1 matches 240 FPS. Lower is more faithful to high-FPS play, higher is faster. |
-| Input resolution | 1 tick | Raise to 2–4 to search faster on long or easy levels. |
-| Solver CPU budget per frame | 50 ms | How long each frame spends solving. The level is hidden while solving, so higher is faster; the progress screen just updates less often. |
-| Center inputs in their timing window | on | Makes the chart as forgiving as possible to hit. |
-| Scroll speed / lane height / width / position | — | Overlay look. |
-| Visual offset | 0 ms | Keep at 0 for exact sync. Only change it to make up for your own input lag. |
+## Playing
+
+- Notes scroll toward the timing line. The markers on the line light up while you hold the button.
+- Each press is rated PERFECT / GREAT / GOOD / EARLY / LATE with its error in ms, and a note you don't press shows MISS. Letting go of a hold well before its end shows DROP. The timing windows are in the settings.
+- Combo and accuracy are shown next to the lanes.
+- The chart fades out when nothing is coming up and fades back in before the next note.
+- Notes are placed using the game's own level clock at the moment the frame is drawn, so there is no drift and no extra frame of lag.
+
+## Solving
+
+While solving, the level is hidden and simulated using only the game's own physics, many times faster than real time. The solving screen shows the steps, how far it has got, and the speed. **Cancel** stops it and keeps the progress, so you can **Resume** later.
+
+1. **Test.** Checks that fast simulation and rolling back to saved states match the real game exactly on this level, and picks the fastest safe mode.
+2. **Search.** A depth-first search over the button state at every physics tick (240 per second). States that always lead to death are remembered and never tried again.
+   - **No spam clicking.** In cube, ball, UFO, robot, spider and swing the default is *not* pressing, so the solver only clicks when a click is needed. In ship and wave it keeps the current input and only changes it when it has to.
+   - **Ships and waves.** Nearly identical ship, wave, UFO and swing positions are treated as the same state ("Ship/wave search precision: Fast"). This turns the search into pathfinding on a grid and stops it from getting stuck on long ship sections. If a section can't be solved like that, that section is searched again with exact positions.
+   - **Human-playable timing.** Ship and wave holds and gaps have a minimum length (settings). If a section is impossible within those limits, they are relaxed for that section only.
+   - **Progress is saved** every 45 seconds, when you pause, cancel or quit, and when the time limit runs out.
+3. **Check.** The path is replayed from a clean restart. If it dies anywhere, the search resumes a little before that point.
+4. **Clean up.** Every click is tested: it is removed if it isn't needed, taps are shortened to what matters, and repeated clicks are turned into one hold when holding plays exactly the same. Ship and wave holds with tiny gaps are joined.
+5. **Center.** Every press and release is moved to the middle of the range of ticks that still works, so the chart is as forgiving as possible.
+6. **Final check.** The finished chart is replayed from a clean restart with nothing skipped. If the cleaned-up chart fails, the original verified chart is used instead. A chart that fails its final check is never saved as complete.
+
+Only one level can be simulated at a time: Geometry Dash's engine runs a level on one thread, and running extra copies of the game in the background would put your save file and other mods at risk. The speed comes from the smarter search instead.
+
+## Importing
+
+- **Rhythm Path charts** (`.rpchart`, or the older `.txt` charts), for example one exported from another computer.
+- **GDR macros** (`.gdr` and `.gdr.json`, the format used by xdBot and other 2.2 bots). Only jump inputs are used.
+
+Imported inputs are replayed in the real game first. If they fail at some point, the working part is kept and the solver finds the rest ("Fix imported inputs that fail").
+
+## Settings
+
+Everything is in the mod's settings (Geode → Rhythm Path → Settings, or **Customize** in the level menu). The main groups:
+
+| Group | Examples |
+|---|---|
+| General | Show the menu on level open, auto-solve, show the chart |
+| Solver | Time limit, solving screen frame rate (60 by default), ship/wave precision, clean-up, holds instead of repeated clicks, centering |
+| Human-playable timing | Shortest ship/wave hold and gap, other modes |
+| When the chart shows | Default percent range |
+| Look | Theme (Clean, Neon, Pastel, Mono, Classic) or custom colors, note shape, glow, key markers, lane labels |
+| Layout | Horizontal or vertical, position (including custom), length, lane size, timing line position, scroll speed and direction, P2 lane, swap lanes |
+| Translucency | Lane and note opacity, fade out when idle |
+| Feedback | Judgements, combo, accuracy, hold judging, timing windows, visual offset |
 
 ## Limitations
 
 - Platformer levels aren't supported. It only handles jump inputs in classic mode.
 - Levels that depend on random triggers can't be solved reliably, because the game's randomness changes between attempts.
 - Turn off noclip, speedhack, frame steppers and other bots or macro tools while solving.
-- On 2-player levels, the top lane is the game's player-1 button and the bottom lane is the player-2 button. Charts are saved separately for each "Flip 2-player controls" setting, so changing that option makes the level solve again.
+- A level with no possible path usually runs until the time limit, because the solver retries more carefully before giving up.
 
 ## Building
 
@@ -74,3 +103,7 @@ CI builds it for Windows, macOS, iOS and Android on every push (`.github/workflo
 geode sdk install        # once, needs the Geode CLI
 geode build
 ```
+
+## Geode mod list
+
+The mod is a normal Geode package (`mod.json`, `logo.png`, `about.md`, `changelog.md`, settings shown in Geode's own settings screen). To put it on Geode's in-game mod list, the developer account named in `mod.json` (`mmdas28`) submits the `.geode` file from a release to the Geode index, following Geode's [publishing guide](https://docs.geode-sdk.org/mods/publishing). Geode's team reviews submissions before they appear.

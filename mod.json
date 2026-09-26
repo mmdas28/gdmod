@@ -8,7 +8,7 @@
 	},
 	"id": "mmdas28.rhythm-path",
 	"name": "Rhythm Path",
-	"version": "v1.1.0",
+	"version": "v2.0.0",
 	"developer": "mmdas28",
 	"description": "Solves the level, then shows its inputs as a scrolling rhythm-game chart.",
 	"tags": [
@@ -17,28 +17,66 @@
 		"utility"
 	],
 	"settings": {
+		"section-general": {
+			"type": "title",
+			"name": "General"
+		},
+		"show-level-menu": {
+			"type": "bool",
+			"name": "Show the menu when opening a level",
+			"description": "When you open a level, show the Rhythm Path menu: play a saved chart, import one, or solve the level. The level waits until you choose.",
+			"default": true
+		},
+		"auto-solve": {
+			"type": "bool",
+			"name": "Auto-solve when the menu is off",
+			"description": "Only used when the level menu is turned off: solve automatically if the level has no saved chart.",
+			"default": false
+		},
+		"show-overlay": {
+			"type": "bool",
+			"name": "Show the chart while playing",
+			"default": true
+		},
 		"section-solver": {
 			"type": "title",
 			"name": "Solver"
 		},
-		"auto-solve": {
-			"type": "bool",
-			"name": "Auto-solve on level start",
-			"description": "Automatically find a path through the level when you open it (only if no saved chart exists). You can always solve manually from the pause menu.",
-			"default": true
-		},
 		"time-limit": {
 			"type": "int",
-			"name": "Solver time limit (seconds)",
-			"description": "Time allowed for finding a path. After this the solver keeps the furthest path found. Centering the timings afterwards can take up to half this long again (at least 30 s), plus a final replay.",
+			"name": "Time limit (seconds)",
+			"description": "Time allowed for finding a path in one go. Progress is saved, so you can resume later with more time. Optimizing and centering the inputs afterwards can take up to half this long again.",
 			"default": 600,
 			"min": 10,
 			"max": 7200
 		},
+		"solver-fps": {
+			"type": "int",
+			"name": "Solving screen frame rate",
+			"description": "How smooth the solving screen is. The solver works between frames, so a lower frame rate gives it slightly more time; 60 keeps the game responsive.",
+			"default": 60,
+			"min": 10,
+			"max": 240,
+			"control": {
+				"slider": true,
+				"arrows": true
+			}
+		},
+		"ship-wave-precision": {
+			"type": "string",
+			"name": "Ship/wave search precision",
+			"description": "How closely the solver compares ship, wave, UFO and swing positions. Fast treats nearly identical positions as the same, which stops the search from getting stuck on long ship sections. If a section can't be solved this way, the solver automatically switches to a more exact comparison for that section.",
+			"default": "Fast",
+			"one-of": [
+				"Fast",
+				"Balanced",
+				"Exact"
+			]
+		},
 		"steps-per-update": {
 			"type": "int",
 			"name": "Physics steps per simulated frame",
-			"description": "How many 240 TPS physics steps the solver runs per simulated game frame. 4 matches playing at 60 FPS, 1 matches 240 FPS. Lower is more faithful to high-FPS play, higher solves faster. The final check uses the same value.",
+			"description": "How many 240 TPS physics steps the solver runs per simulated game frame. 4 matches playing at 60 FPS, 1 matches 240 FPS. The final check uses the same value.",
 			"default": 4,
 			"min": 1,
 			"max": 8
@@ -46,41 +84,362 @@
 		"input-resolution": {
 			"type": "int",
 			"name": "Input resolution (ticks)",
-			"description": "The solver may only change an input every N physics ticks (240 per second) while searching. 1 finds the most solutions; 2-4 search faster. If \"Center inputs in their timing window\" is on, each note is then moved to the middle of its working range, tick by tick (skipped in exact replay mode).",
+			"description": "The solver may only change an input every N physics ticks (240 per second) while searching. 1 finds the most solutions; 2-4 search faster.",
 			"default": 1,
 			"min": 1,
 			"max": 8
 		},
-		"frame-budget": {
-			"type": "int",
-			"name": "Solver CPU budget per frame (ms)",
-			"description": "How much time per rendered frame the solver may use. The game is hidden while solving, so a high value makes solving faster; the progress screen just updates less often.",
-			"default": 50,
-			"min": 2,
-			"max": 500
+		"optimize-inputs": {
+			"type": "bool",
+			"name": "Clean up the inputs",
+			"description": "After a path is found, remove clicks that aren't needed and shorten taps to the length that actually matters, so the chart has as few notes as possible.",
+			"default": true
+		},
+		"prefer-holds": {
+			"type": "bool",
+			"name": "Prefer holding over repeated clicks",
+			"description": "When holding the button through a section plays exactly the same as clicking repeatedly (for example a cube jumping on every landing), use one hold note instead.",
+			"default": true
+		},
+		"merge-gap-ms": {
+			"type": "float",
+			"name": "Join ship/wave inputs closer than (ms)",
+			"description": "While cleaning up, try to join two ship or wave holds separated by a gap shorter than this into one hold, if the level still plays the same.",
+			"default": 40.0,
+			"min": 0.0,
+			"max": 200.0,
+			"control": {
+				"slider": true,
+				"arrows": true,
+				"arrow-step": 5.0
+			}
 		},
 		"refine-timing": {
 			"type": "bool",
 			"name": "Center inputs in their timing window",
-			"description": "After a path is found, move every press/release to the middle of the range of ticks that still works, so the chart is as forgiving as possible to hit.",
+			"description": "After a path is found, move every press and release to the middle of the range of ticks that still works, so the chart is as forgiving as possible.",
 			"default": true
 		},
 		"refine-window": {
 			"type": "int",
-			"name": "Timing refine search range (ticks)",
+			"name": "Centering search range (ticks)",
 			"description": "How far (in 240 TPS ticks) each input is shifted each way while looking for its safe window.",
 			"default": 20,
 			"min": 2,
 			"max": 60
 		},
-		"section-overlay": {
-			"type": "title",
-			"name": "Overlay"
-		},
-		"show-overlay": {
+		"repair-imports": {
 			"type": "bool",
-			"name": "Show rhythm overlay",
+			"name": "Fix imported inputs that fail",
+			"description": "If imported inputs die before the end, keep the part that works and let the solver find the rest.",
 			"default": true
+		},
+		"section-timing": {
+			"type": "title",
+			"name": "Human-playable timing",
+			"description": "Minimum lengths the solver uses for holds and gaps, so charts stay playable by hand. If a section is impossible with these limits, the solver relaxes them for that section (when allowed below)."
+		},
+		"ship-min-hold-ms": {
+			"type": "float",
+			"name": "Ship: shortest hold (ms)",
+			"default": 30.0,
+			"min": 0.0,
+			"max": 200.0,
+			"control": {
+				"slider": true,
+				"arrows": true,
+				"arrow-step": 5.0
+			}
+		},
+		"ship-min-release-ms": {
+			"type": "float",
+			"name": "Ship: shortest gap between holds (ms)",
+			"default": 30.0,
+			"min": 0.0,
+			"max": 200.0,
+			"control": {
+				"slider": true,
+				"arrows": true,
+				"arrow-step": 5.0
+			}
+		},
+		"wave-min-hold-ms": {
+			"type": "float",
+			"name": "Wave: shortest hold (ms)",
+			"default": 20.0,
+			"min": 0.0,
+			"max": 200.0,
+			"control": {
+				"slider": true,
+				"arrows": true,
+				"arrow-step": 5.0
+			}
+		},
+		"wave-min-release-ms": {
+			"type": "float",
+			"name": "Wave: shortest gap between holds (ms)",
+			"default": 20.0,
+			"min": 0.0,
+			"max": 200.0,
+			"control": {
+				"slider": true,
+				"arrows": true,
+				"arrow-step": 5.0
+			}
+		},
+		"other-min-hold-ms": {
+			"type": "float",
+			"name": "Other modes: shortest hold (ms)",
+			"description": "Cube, ball, UFO, robot, spider and swing.",
+			"default": 0.0,
+			"min": 0.0,
+			"max": 200.0,
+			"control": {
+				"slider": true,
+				"arrows": true,
+				"arrow-step": 5.0
+			}
+		},
+		"other-min-release-ms": {
+			"type": "float",
+			"name": "Other modes: shortest gap between clicks (ms)",
+			"description": "Cube, ball, UFO, robot, spider and swing.",
+			"default": 0.0,
+			"min": 0.0,
+			"max": 200.0,
+			"control": {
+				"slider": true,
+				"arrows": true,
+				"arrow-step": 5.0
+			}
+		},
+		"relax-timing-if-stuck": {
+			"type": "bool",
+			"name": "Relax these limits when a section needs it",
+			"default": true
+		},
+		"section-range": {
+			"type": "title",
+			"name": "When the chart shows"
+		},
+		"range-from": {
+			"type": "float",
+			"name": "Show the chart from (%)",
+			"description": "Default for every level. You can set a different range for one level in its Rhythm Path menu.",
+			"default": 0.0,
+			"min": 0.0,
+			"max": 100.0,
+			"control": {
+				"slider": true,
+				"arrows": true,
+				"arrow-step": 1.0
+			}
+		},
+		"range-to": {
+			"type": "float",
+			"name": "Show the chart until (%)",
+			"default": 100.0,
+			"min": 0.0,
+			"max": 100.0,
+			"control": {
+				"slider": true,
+				"arrows": true,
+				"arrow-step": 1.0
+			}
+		},
+		"section-look": {
+			"type": "title",
+			"name": "Look"
+		},
+		"theme": {
+			"type": "string",
+			"name": "Theme",
+			"description": "Color preset for the chart. Turn on custom colors below to pick your own.",
+			"default": "Clean",
+			"one-of": [
+				"Clean",
+				"Neon",
+				"Pastel",
+				"Mono",
+				"Classic"
+			]
+		},
+		"custom-colors": {
+			"type": "bool",
+			"name": "Use custom colors",
+			"default": false
+		},
+		"p1-color": {
+			"type": "rgba",
+			"name": "P1 note color",
+			"default": [
+				90,
+				200,
+				255,
+				255
+			],
+			"enable-if": "custom-colors"
+		},
+		"p2-color": {
+			"type": "rgba",
+			"name": "P2 note color",
+			"default": [
+				255,
+				120,
+				200,
+				255
+			],
+			"enable-if": "custom-colors"
+		},
+		"line-color": {
+			"type": "rgba",
+			"name": "Timing line color",
+			"default": [
+				240,
+				244,
+				255,
+				255
+			],
+			"enable-if": "custom-colors"
+		},
+		"lane-color": {
+			"type": "rgba",
+			"name": "Lane background",
+			"description": "The alpha value sets how see-through the lanes are.",
+			"default": [
+				16,
+				18,
+				28,
+				160
+			],
+			"enable-if": "custom-colors"
+		},
+		"note-style": {
+			"type": "string",
+			"name": "Note shape",
+			"default": "Rounded",
+			"one-of": [
+				"Rounded",
+				"Square",
+				"Circle"
+			]
+		},
+		"glow": {
+			"type": "bool",
+			"name": "Glow effects",
+			"default": true
+		},
+		"show-receptors": {
+			"type": "bool",
+			"name": "Show key markers on the timing line",
+			"description": "Markers on the timing line that light up while you hold the button.",
+			"default": true
+		},
+		"lane-labels": {
+			"type": "bool",
+			"name": "Show lane labels",
+			"default": true
+		},
+		"p1-label": {
+			"type": "string",
+			"name": "P1 lane label",
+			"default": "P1"
+		},
+		"p2-label": {
+			"type": "string",
+			"name": "P2 lane label",
+			"default": "P2"
+		},
+		"section-layout": {
+			"type": "title",
+			"name": "Layout"
+		},
+		"orientation": {
+			"type": "string",
+			"name": "Orientation",
+			"description": "Horizontal: notes scroll sideways into a vertical timing line. Vertical: notes fall down columns into a horizontal timing line, like FNF.",
+			"default": "Horizontal",
+			"one-of": [
+				"Horizontal",
+				"Vertical"
+			]
+		},
+		"overlay-position": {
+			"type": "string",
+			"name": "Position",
+			"description": "Left and Right are for the vertical layout.",
+			"default": "Top",
+			"one-of": [
+				"Top",
+				"Bottom",
+				"Left",
+				"Right",
+				"Center",
+				"Custom"
+			]
+		},
+		"custom-x": {
+			"type": "float",
+			"name": "Custom position X",
+			"description": "Center of the chart as a fraction of the screen width (Position: Custom).",
+			"default": 0.5,
+			"min": 0.0,
+			"max": 1.0,
+			"control": {
+				"slider": true,
+				"arrows": true,
+				"arrow-step": 0.01
+			}
+		},
+		"custom-y": {
+			"type": "float",
+			"name": "Custom position Y",
+			"description": "Center of the chart as a fraction of the screen height (Position: Custom).",
+			"default": 0.85,
+			"min": 0.0,
+			"max": 1.0,
+			"control": {
+				"slider": true,
+				"arrows": true,
+				"arrow-step": 0.01
+			}
+		},
+		"overlay-width": {
+			"type": "float",
+			"name": "Length (fraction of screen)",
+			"description": "How long the lanes are, along the scroll direction.",
+			"default": 0.62,
+			"min": 0.2,
+			"max": 1.0,
+			"control": {
+				"slider": true,
+				"arrows": true,
+				"arrow-step": 0.02
+			}
+		},
+		"lane-height": {
+			"type": "float",
+			"name": "Lane size",
+			"default": 26.0,
+			"min": 10.0,
+			"max": 80.0,
+			"control": {
+				"slider": true,
+				"arrows": true,
+				"arrow-step": 1.0
+			}
+		},
+		"hit-line-x": {
+			"type": "float",
+			"name": "Timing line distance from the start of the lanes",
+			"default": 34.0,
+			"min": 8.0,
+			"max": 300.0,
+			"control": {
+				"slider": true,
+				"arrows": true,
+				"arrow-step": 2.0
+			}
 		},
 		"scroll-speed": {
 			"type": "float",
@@ -92,107 +451,180 @@
 			"control": {
 				"slider": true,
 				"arrows": true,
-				"big-arrows": true,
-				"arrow-step": 10,
-				"big-arrow-step": 100
+				"arrow-step": 10.0
 			}
 		},
-		"overlay-position": {
-			"type": "string",
-			"name": "Overlay position",
-			"default": "Top",
-			"one-of": [
-				"Top",
-				"Bottom"
-			]
-		},
-		"overlay-width": {
-			"type": "float",
-			"name": "Overlay width (fraction of screen)",
-			"default": 0.62,
-			"min": 0.25,
-			"max": 1.0,
-			"control": {
-				"slider": true,
-				"arrow-step": 0.02
-			}
-		},
-		"lane-height": {
-			"type": "float",
-			"name": "Lane height",
-			"default": 26.0,
-			"min": 10.0,
-			"max": 70.0,
-			"control": {
-				"slider": true,
-				"arrow-step": 1
-			}
-		},
-		"hit-line-x": {
-			"type": "float",
-			"name": "Timing line distance from left edge",
-			"default": 34.0,
-			"min": 8.0,
-			"max": 300.0,
-			"control": {
-				"slider": true,
-				"arrow-step": 2
-			}
-		},
-		"overlay-opacity": {
-			"type": "float",
-			"name": "Background opacity",
-			"default": 0.72,
-			"min": 0.0,
-			"max": 1.0,
-			"control": {
-				"slider": true,
-				"arrow-step": 0.05
-			}
+		"reverse-scroll": {
+			"type": "bool",
+			"name": "Reverse scroll direction",
+			"description": "Horizontal: notes come from the left. Vertical: notes rise from the bottom.",
+			"default": false
 		},
 		"always-show-p2": {
 			"type": "bool",
 			"name": "Always show the P2 lane",
-			"description": "Show the P2 lane even on levels that are not 2-player. When off, the P2 lane only appears on 2-player levels.",
+			"description": "Show the P2 lane even on levels that are not 2-player.",
+			"default": false
+		},
+		"swap-lanes": {
+			"type": "bool",
+			"name": "Swap P1 and P2 lanes",
+			"default": false
+		},
+		"section-translucency": {
+			"type": "title",
+			"name": "Translucency"
+		},
+		"overlay-opacity": {
+			"type": "float",
+			"name": "Lane opacity",
+			"description": "Multiplies the lane background's own alpha.",
+			"default": 1.0,
+			"min": 0.0,
+			"max": 1.0,
+			"control": {
+				"slider": true,
+				"arrows": true,
+				"arrow-step": 0.05
+			}
+		},
+		"note-opacity": {
+			"type": "float",
+			"name": "Note opacity",
+			"default": 1.0,
+			"min": 0.1,
+			"max": 1.0,
+			"control": {
+				"slider": true,
+				"arrows": true,
+				"arrow-step": 0.05
+			}
+		},
+		"idle-fade": {
+			"type": "bool",
+			"name": "Fade out when no notes are coming",
 			"default": true
+		},
+		"idle-opacity": {
+			"type": "float",
+			"name": "Faded opacity",
+			"default": 0.3,
+			"min": 0.0,
+			"max": 1.0,
+			"control": {
+				"slider": true,
+				"arrows": true,
+				"arrow-step": 0.05
+			},
+			"enable-if": "idle-fade"
+		},
+		"idle-seconds": {
+			"type": "float",
+			"name": "Fade after (seconds without notes)",
+			"default": 1.5,
+			"min": 0.5,
+			"max": 10.0,
+			"control": {
+				"slider": true,
+				"arrows": true,
+				"arrow-step": 0.5
+			},
+			"enable-if": "idle-fade"
+		},
+		"section-feedback": {
+			"type": "title",
+			"name": "Feedback and timing windows"
 		},
 		"show-judgements": {
 			"type": "bool",
 			"name": "Show hit timing feedback",
-			"description": "Show how early/late each of your presses and releases was compared to the chart.",
+			"description": "Show how early or late each press and release was.",
 			"default": true
 		},
-		"note-color": {
-			"type": "rgba",
-			"name": "Note color",
-			"default": [
-				60,
-				220,
-				90,
-				255
-			]
+		"show-combo": {
+			"type": "bool",
+			"name": "Show combo",
+			"default": true
 		},
-		"line-color": {
-			"type": "rgba",
-			"name": "Timing line color",
-			"default": [
-				30,
-				150,
-				255,
-				255
-			]
+		"show-accuracy": {
+			"type": "bool",
+			"name": "Show accuracy",
+			"default": true
+		},
+		"judge-holds": {
+			"type": "bool",
+			"name": "Judge holds",
+			"description": "Hold notes count as dropped if you let go well before the end.",
+			"default": true
+		},
+		"perfect-ms": {
+			"type": "float",
+			"name": "PERFECT window (ms)",
+			"default": 7.0,
+			"min": 1.0,
+			"max": 50.0,
+			"control": {
+				"slider": true,
+				"arrows": true,
+				"arrow-step": 1.0
+			}
+		},
+		"great-ms": {
+			"type": "float",
+			"name": "GREAT window (ms)",
+			"default": 19.0,
+			"min": 2.0,
+			"max": 80.0,
+			"control": {
+				"slider": true,
+				"arrows": true,
+				"arrow-step": 1.0
+			}
+		},
+		"good-ms": {
+			"type": "float",
+			"name": "GOOD window (ms)",
+			"default": 40.0,
+			"min": 5.0,
+			"max": 120.0,
+			"control": {
+				"slider": true,
+				"arrows": true,
+				"arrow-step": 1.0
+			}
+		},
+		"miss-ms": {
+			"type": "float",
+			"name": "Latest counted hit (ms)",
+			"description": "Presses further than this from any note are ignored, and notes not hit within it count as a miss.",
+			"default": 135.0,
+			"min": 40.0,
+			"max": 250.0,
+			"control": {
+				"slider": true,
+				"arrows": true,
+				"arrow-step": 5.0
+			}
 		},
 		"visual-offset-ms": {
 			"type": "float",
 			"name": "Visual offset (ms)",
-			"description": "Leave at 0 for exact game-synced timing. Positive values make notes arrive earlier (compensates for input lag on your setup).",
+			"description": "Leave at 0 for exact game-synced timing. Positive values make notes arrive earlier (compensates for display lag).",
 			"default": 0.0,
 			"min": -150.0,
 			"max": 150.0,
 			"control": {
 				"slider": true,
-				"arrow-step": 1
+				"arrows": true,
+				"arrow-step": 1.0
 			}
 		}
+	},
+	"links": {
+		"source": "https://github.com/mmdas28/gdmod"
+	},
+	"issues": {
+		"info": "Report problems on GitHub.",
+		"url": "https://github.com/mmdas28/gdmod/issues"
 	}
 }

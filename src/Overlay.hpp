@@ -22,6 +22,7 @@ public:
     void onLevelReset();
     void onInput(int lane, bool down, double levelTime);
     void onCancelSolve(cocos2d::CCObject* sender);
+    void refreshStyleNow();
 
 private:
     struct Style {
