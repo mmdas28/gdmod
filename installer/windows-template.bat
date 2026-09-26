@@ -320,6 +320,9 @@ function Wait-GDClosed {
             Write-Caution '(Its files are locked while it runs, and mods only load when the game starts.)'
             $warned = $true
         }
+        $redirected = $false
+        try { $redirected = [Console]::IsInputRedirected } catch { }
+        if ($redirected) { Stop-Install 'Close Geometry Dash, then run the installer again.' }
         [void](Read-Answer 'Press Enter once Geometry Dash is closed...')
     }
 }
@@ -442,7 +445,7 @@ function Get-GeodeRelease([version]$Min) {
     }
     Write-Info 'Checking for the newest Geode release...'
     try {
-        $r = Invoke-RestMethod -UseBasicParsing -TimeoutSec 20 -Uri 'https://api.github.com/repos/geode-sdk/geode/releases/latest' -Headers @{ 'User-Agent' = $UserAgent; 'Accept' = 'application/vnd.github+json' }
+        $r = Invoke-RestMethod -UseBasicParsing -TimeoutSec 20 -UserAgent $UserAgent -Uri 'https://api.github.com/repos/geode-sdk/geode/releases/latest'
         if ([string]$r.tag_name -match '^v(\d+)\.(\d+)\.(\d+)$') {
             $v = [version]::new([int]$Matches[1], [int]$Matches[2], [int]$Matches[3])
             if ($v.Major -eq $Min.Major -and $v -ge $Min) {
@@ -629,10 +632,11 @@ function Start-GD([string]$Gd) {
         return
     } catch { }
     $exe = Join-Path $Gd 'GeometryDash.exe'
-    if (Test-File $exe) {
+    try {
+        if (-not (Test-File $exe)) { throw 'GeometryDash.exe not found' }
         Start-Process -FilePath $exe -WorkingDirectory $Gd
         Write-Ok 'Starting Geometry Dash...'
-    } else {
+    } catch {
         Write-Caution 'Could not start Geometry Dash automatically. Start it from Steam.'
     }
 }

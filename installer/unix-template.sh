@@ -32,8 +32,7 @@ die() {
     exit 1
 }
 
-cleanup() { if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then rm -rf "$TMP_DIR"; fi; }
-trap cleanup EXIT
+trap 'if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then rm -rf "$TMP_DIR"; fi' EXIT
 trap 'exit 130' INT TERM
 
 interactive() { [ -t 0 ] && [ -t 1 ]; }
@@ -194,7 +193,7 @@ candidates() {
 
 resolve_path() {
     local p=$1 i up
-    case "$p" in "~/"*) p="$HOME/${p#\~/}" ;; esac
+    case "$p" in \~/*) p="$HOME/${p#\~/}" ;; esac
     [ -e "$p" ] || return 1
     [ -f "$p" ] && p=$(dirname "$p")
     {
@@ -428,7 +427,7 @@ main() {
 
     printf '\n  %sDone! %s is installed.%s\n\n' "$C_GREEN" "$title" "$C_RESET"
     if interactive && confirm 'Start Geometry Dash now?' y; then launch_gd; fi
-    exit 0
+    return 0
 }
 
 main "$@"
