@@ -25,13 +25,11 @@ If Windows shows "Windows protected your PC", click **More info → Run anyway**
 
 **Android / manual:** download `mmdas28.rhythm-path.geode` from the release and put it in your Geode `mods` folder (Geode → Settings → Open mods folder).
 
-The repository is private, so only GitHub accounts with access to it can open the release page and download the installers.
-
 ### Build it yourself (Windows)
 
 Use this when the release page doesn't have the newest version yet (for example while GitHub isn't running builds).
 
-1. On GitHub, signed in, open the repository and choose **Code → Download ZIP**, then extract the whole ZIP.
+1. On GitHub, open the repository and choose **Code → Download ZIP**, then extract the whole ZIP.
 2. Close Geometry Dash and double-click **`Build-RhythmPath-Windows.bat`** in the extracted folder. If Windows shows "Windows protected your PC", click **More info → Run anyway**.
 3. It shows what it needs and asks before changing anything:
    - Visual Studio 2022 Build Tools with C++ and Clang, only if you don't have them yet (from Microsoft, about 4-6 GB; Windows asks for administrator rights and the installer shows Microsoft's license).
