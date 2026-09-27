@@ -21,6 +21,7 @@ constexpr int kFastTestTicks = 480;
 constexpr int kEscalateTicks = 240 * 5;
 constexpr int kDeescalateTicks = 240 * 10;
 constexpr double kMinStallSeconds = 15.0;
+constexpr uint64_t kMinStallBacktracks = 200;
 constexpr int kJoinGapTicks = 150;
 constexpr int kExactTier = 2;
 constexpr auto kAutoSaveInterval = std::chrono::seconds(45);
@@ -273,6 +274,7 @@ Solver::LadderStep const& Solver::currentStep() const {
 void Solver::markProgress() {
     m_progressMark = m_maxTick;
     m_progressTime = runSeconds();
+    m_progressBacktracks = m_backtracks;
 }
 
 bool Solver::canEscalate() const {
@@ -1350,7 +1352,11 @@ bool Solver::advanceSearch() {
     }
     if (m_level > 0 && m_maxTick > m_escalatedAt + kDeescalateTicks) deescalate();
     if (m_maxTick > m_progressMark) markProgress();
-    else if (canEscalate() && runSeconds() - m_progressTime > std::max(kMinStallSeconds, m_timeLimitSec / 12.0)) {
+    else if (
+        canEscalate() && !(m_preloadTiming && m_preloadEnd > 0) &&
+        m_backtracks - m_progressBacktracks >= kMinStallBacktracks &&
+        runSeconds() - m_progressTime > std::max(kMinStallSeconds, m_timeLimitSec / 12.0)
+    ) {
         log::info("Solver: no progress for {:.0f}s at tick {}", runSeconds() - m_progressTime, m_maxTick);
         escalate();
         return true;

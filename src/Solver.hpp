@@ -221,6 +221,7 @@ private:
     std::string m_preloadSignature;
     int m_progressMark = 0;
     double m_progressTime = 0.0;
+    uint64_t m_progressBacktracks = 0;
     void markProgress();
 
     int m_searchCpInterval = 8;
