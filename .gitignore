@@ -62,3 +62,7 @@ build-*/
 # CLion
 .idea/
 /cmake-build-*/
+
+# Local Windows build output
+dist/
+build-log.txt

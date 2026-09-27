@@ -27,6 +27,20 @@ If Windows shows "Windows protected your PC", click **More info → Run anyway**
 
 The repository is private, so only GitHub accounts with access to it can open the release page and download the installers.
 
+### Build it yourself (Windows)
+
+Use this when the release page doesn't have the newest version yet (for example while GitHub isn't running builds).
+
+1. On GitHub, signed in, open the repository and choose **Code → Download ZIP**, then extract the whole ZIP.
+2. Close Geometry Dash and double-click **`Build-RhythmPath-Windows.bat`** in the extracted folder. If Windows shows "Windows protected your PC", click **More info → Run anyway**.
+3. It shows what it needs and asks before changing anything:
+   - Visual Studio 2022 Build Tools with C++ and Clang, only if you don't have them yet (from Microsoft, about 4-6 GB; Windows asks for administrator rights and the installer shows Microsoft's license).
+   - Portable Git, CMake, Ninja, the Geode command-line tool and the Geode SDK, downloaded into `%LOCALAPPDATA%\RhythmPathBuild` (about 1-2 GB).
+4. The first build takes roughly 15-40 minutes; later builds take a few minutes. It builds the same way as CI (Clang + Ninja, Geode SDK from `mod.json`).
+5. When it's done it creates `dist\RhythmPath-Installer-Windows.bat` and `dist\mmdas28.rhythm-path.geode` next to the script and offers to run the installer right away.
+
+If something fails, the full output is in `build-log.txt` next to the script.
+
 ## The level menu
 
 When you open a level, the Rhythm Path menu appears and the level waits until you pick something:
