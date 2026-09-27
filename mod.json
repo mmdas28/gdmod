@@ -65,7 +65,7 @@
 		"ship-wave-precision": {
 			"type": "string",
 			"name": "Ship/wave search precision",
-			"description": "How closely the solver compares ship, wave, UFO and swing positions. Fast treats nearly identical positions as the same, which stops the search from getting stuck on long ship sections. If a section can't be solved this way, the solver automatically switches to a more exact comparison for that section.",
+			"description": "How closely the solver compares ship, wave, UFO and swing positions. Fast treats nearly identical positions as the same, which stops the search from getting stuck on long ship sections. If a section can't be solved this way, the solver retries it with a finer comparison, then with relaxed timing limits (if allowed), and only then with exact positions. It goes back to this setting once it's past that section.",
 			"default": "Fast",
 			"one-of": [
 				"Fast",

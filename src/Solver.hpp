@@ -219,6 +219,9 @@ private:
     int m_preloadEnd = 0;
     bool m_preloadTiming = false;
     std::string m_preloadSignature;
+    int m_progressMark = 0;
+    double m_progressTime = 0.0;
+    void markProgress();
 
     int m_searchCpInterval = 8;
     int m_denseWindow = 1440;

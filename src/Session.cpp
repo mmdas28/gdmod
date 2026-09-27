@@ -587,6 +587,10 @@ void pickImportFile(Session& s) {
 
 void playChart(Session& s) {
     s.chartHidden = false;
+    if (!Mod::get()->getSettingValue<bool>("show-overlay")) {
+        Mod::get()->setSettingValue<bool>("show-overlay", true);
+        if (auto overlay = s.getOverlay()) overlay->refreshStyleNow();
+    }
     setOverlayVisible(s, true);
     closeLevelMenu(s, true);
 }

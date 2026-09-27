@@ -20,6 +20,7 @@ constexpr int kRepairRewindTicks = 120;
 constexpr int kFastTestTicks = 480;
 constexpr int kEscalateTicks = 240 * 5;
 constexpr int kDeescalateTicks = 240 * 10;
+constexpr double kMinStallSeconds = 15.0;
 constexpr int kJoinGapTicks = 150;
 constexpr int kExactTier = 2;
 constexpr auto kAutoSaveInterval = std::chrono::seconds(45);
@@ -178,9 +179,9 @@ void Solver::buildLadder() {
     };
     add(m_startTier, true);
     add(1, true);
-    add(2, true);
     add(m_startTier, false);
     add(1, false);
+    add(2, true);
     add(2, false);
     m_level = 0;
 }
@@ -269,6 +270,11 @@ Solver::LadderStep const& Solver::currentStep() const {
     return m_ladder[std::clamp(m_level, 0, static_cast<int>(m_ladder.size()) - 1)];
 }
 
+void Solver::markProgress() {
+    m_progressMark = m_maxTick;
+    m_progressTime = runSeconds();
+}
+
 bool Solver::canEscalate() const {
     return m_level + 1 < static_cast<int>(m_ladder.size());
 }
@@ -276,6 +282,7 @@ bool Solver::canEscalate() const {
 void Solver::escalate() {
     m_level = std::min(m_level + 1, static_cast<int>(m_ladder.size()) - 1);
     m_escalatedAt = m_maxTick;
+    markProgress();
     m_levelBase = static_cast<int>(m_path.size());
     m_preloadEnd = 0;
     m_dead.clear();
@@ -307,6 +314,7 @@ void Solver::escalate() {
 void Solver::deescalate() {
     m_level = 0;
     m_levelBase = 0;
+    markProgress();
     m_preloadEnd = 0;
     m_dead.clear();
     for (auto& node : m_path) node.hash = 0;
@@ -1018,6 +1026,7 @@ void Solver::beforeStep(bool halfTick) {
             break;
         }
         case Phase::Search: {
+            if (m_preloadEnd > 0 && t >= m_preloadEnd) m_preloadEnd = 0;
             if (t < static_cast<int>(m_path.size())) {
                 uint8_t modes = laneModesNow();
                 recordLaneModes(t, modes);
@@ -1319,6 +1328,7 @@ void Solver::beginSearchFresh() {
     m_levelBase = 0;
     m_preloadEnd = 0;
     m_preloadTiming = false;
+    markProgress();
     m_finestTier = currentStep().tier;
     m_phase = Phase::Search;
     if (m_restoreMode == RestoreMode::Checkpoint) createCheckpointHere();
@@ -1339,6 +1349,12 @@ bool Solver::advanceSearch() {
         return false;
     }
     if (m_level > 0 && m_maxTick > m_escalatedAt + kDeescalateTicks) deescalate();
+    if (m_maxTick > m_progressMark) markProgress();
+    else if (canEscalate() && runSeconds() - m_progressTime > std::max(kMinStallSeconds, m_timeLimitSec / 12.0)) {
+        log::info("Solver: no progress for {:.0f}s at tick {}", runSeconds() - m_progressTime, m_maxTick);
+        escalate();
+        return true;
+    }
     if (m_restoreMode == RestoreMode::Checkpoint && !hasCheckpointWithin(m_searchCpInterval)) {
         createCheckpointHere();
     }
@@ -1460,6 +1476,7 @@ void Solver::onSearchSuccess() {
         seq.resize(static_cast<size_t>(m_successTick) + 1);
     }
     m_success = false;
+    m_preloadEnd = 0;
     m_maxPercent = std::max(m_maxPercent, m_targetPercent);
     log::info(
         "Solver found a path ({} ticks, {} backtracks, {} pruned, {:.1f}s), verifying",
@@ -1633,6 +1650,7 @@ void Solver::onVerifyFailed(int tick) {
         m_escalatedAt = rewind;
         m_levelBase = rewind;
     }
+    markProgress();
     m_phase = Phase::Search;
     m_finestTier = std::max(m_finestTier, currentStep().tier);
     restoreTo(rewind);
