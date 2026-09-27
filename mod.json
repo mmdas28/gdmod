@@ -8,7 +8,7 @@
 	},
 	"id": "mmdas28.rhythm-path",
 	"name": "Rhythm Path",
-	"version": "v2.0.0",
+	"version": "v2.0.1",
 	"developer": "mmdas28",
 	"description": "Solves the level, then shows its inputs as a scrolling rhythm-game chart.",
 	"tags": [

@@ -102,6 +102,35 @@ void holdAudio(Session& s, bool hold) {
     }
 }
 
+void applyGameplayCursor() {
+#ifdef GEODE_IS_DESKTOP
+    auto gm = GameManager::sharedState();
+    if (!gm) return;
+    if (gm->getGameVariable("0128")) PlatformToolbox::toggleLockCursor(true);
+    else if (!gm->getGameVariable("0024")) PlatformToolbox::hideCursor();
+#endif
+}
+
+void holdCursor(Session& s, bool hold) {
+#ifdef GEODE_IS_DESKTOP
+    auto layer = s.layer;
+    if (!layer) return;
+    bool paused = layer->m_isPaused;
+    if (hold) {
+        if (!s.cursorHeld || (s.cursorPaused && !paused)) {
+            PlatformToolbox::toggleLockCursor(false);
+            PlatformToolbox::showCursor();
+            s.cursorHeld = true;
+        }
+    }
+    else if (s.cursorHeld) {
+        s.cursorHeld = false;
+        if (!paused && !layer->m_hasCompletedLevel) applyGameplayCursor();
+    }
+    s.cursorPaused = paused;
+#endif
+}
+
 bool currentFlip(Session const& s) {
     if (!s.ref.twoPlayer) return false;
     auto gm = GameManager::sharedState();
@@ -323,6 +352,7 @@ void Session::shutdown() {
     menuOpen = false;
     menuAtLevelStart = false;
     holdAudio(*this, false);
+    cursorHeld = false;
     if (menu) {
         Ref<CCNode> node = menu;
         menu = nullptr;
@@ -398,6 +428,7 @@ void tickSession(Session& s) {
     if (s.pendingRequest && !s.solver && !s.frozen() && layer->m_started && !layer->m_isPaused) startPending(s);
 
     holdAudio(s, s.frozen());
+    holdCursor(s, s.frozen() || s.solving());
 }
 
 void openLevelMenu(Session& s) {

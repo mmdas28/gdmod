@@ -1,3 +1,7 @@
+# v2.0.1
+
+- The mouse cursor is visible and free to move while the Rhythm Path menu or the solving screen is open. When you start playing, Geometry Dash's own "show cursor" and "lock cursor" options apply again.
+
 # v2.0.0
 
 - **Level menu** when you open a level: play, export or delete the saved chart, solve or resume, import a chart or a GDR macro, and pick the percent range where the chart shows. Charts are now saved per level ID (and per start position).

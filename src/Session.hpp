@@ -34,6 +34,8 @@ struct Session {
     bool chartHidden = false;
     bool menuAtLevelStart = false;
     bool audioHeld = false;
+    bool cursorHeld = false;
+    bool cursorPaused = false;
     bool cancelSaved = false;
     StartPosObject* refStartPos = nullptr;
     cocos2d::CCPoint refStartPosAt;
