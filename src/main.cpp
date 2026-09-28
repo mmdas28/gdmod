@@ -85,7 +85,7 @@ class $modify(RPPlayLayer, PlayLayer) {
     void destroyPlayer(PlayerObject* player, GameObject* object) {
         if (auto solver = runningSolver(rpSession())) {
             if (object != m_anticheatSpike) {
-                solver->onPlayerDestroyed();
+                solver->onPlayerDestroyed(player, object);
                 return;
             }
         }

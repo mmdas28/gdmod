@@ -8,7 +8,7 @@
 	},
 	"id": "mmdas28.rhythm-path",
 	"name": "Rhythm Path",
-	"version": "v2.0.1",
+	"version": "v2.1.0",
 	"developer": "mmdas28",
 	"description": "Solves the level, then shows its inputs as a scrolling rhythm-game chart.",
 	"tags": [
@@ -41,6 +41,12 @@
 		"section-solver": {
 			"type": "title",
 			"name": "Solver"
+		},
+		"use-planner": {
+			"type": "bool",
+			"name": "Plan inputs from the level's hitboxes",
+			"description": "Reads every hitbox in the level and plans the inputs from the game's own physics, so the solver only has to confirm them instead of trying every possibility. Turn off to use the old search only.",
+			"default": true
 		},
 		"time-limit": {
 			"type": "int",

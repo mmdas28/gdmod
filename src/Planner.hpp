@@ -82,6 +82,11 @@ public:
 
     void onRestore(int tick);
     void observe(int tick, uint8_t held, bool died);
+    void observe(int tick, uint8_t held, bool died, bool betweenFrames) {
+        m_betweenFrames = betweenFrames;
+        observe(tick, held, died);
+        m_betweenFrames = false;
+    }
     PlannerAdvice advise(int tick, uint8_t prevHeld);
     std::optional<PlannerHint> onDeath(DeathInfo const& death, std::vector<uint8_t> const& path);
     PlannerWindow pressWindow(int lane, int startTick, int endTick, std::vector<uint8_t> const& seq);
@@ -91,6 +96,7 @@ public:
 
 private:
     std::unique_ptr<PlannerImpl> m_impl;
+    bool m_betweenFrames = false;
 };
 
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Chart.hpp"
+#include "Planner.hpp"
 #include "PlayerState.hpp"
 #include "SolverProgress.hpp"
 #include "Storage.hpp"
@@ -9,6 +10,7 @@
 #include <chrono>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_set>
@@ -79,6 +81,7 @@ struct SearchNode {
     uint8_t flips = 0;
     bool seeded = false;
     bool recompute = false;
+    bool reordered = false;
 };
 
 struct StatSnapshot {
@@ -127,7 +130,7 @@ public:
 
     void beforeStep(bool halfTick);
     void afterStep(bool halfTick);
-    void onPlayerDestroyed();
+    void onPlayerDestroyed(PlayerObject* player, GameObject* object);
     void onLevelComplete();
 
     SolverView view() const;
@@ -151,6 +154,13 @@ private:
         int tier = 2;
         bool constraints = false;
     };
+
+    struct PendingHint {
+        int tick = 0;
+        int death = 0;
+    };
+
+    static constexpr int kPhaseCount = 9;
 
     PlayLayer* m_layer = nullptr;
     LevelRef m_ref;
@@ -178,6 +188,8 @@ private:
     int m_deathTick = -1;
     int m_prunedAt = -1;
     int m_successTick = -1;
+    int m_successChunk = -1;
+    int m_chunkLast = -1;
     int m_stallFrames = 0;
     bool m_sawHalfTick = false;
 
@@ -252,6 +264,11 @@ private:
     int m_selfTestMismatch = -1;
     int m_selfTestCpTick = -1;
     bool m_selfTestDied = false;
+    bool m_restoreExact = false;
+    bool m_restoreBad = false;
+    bool m_restoreProbe = false;
+    bool m_probeMismatch = false;
+    int m_probeChecked = 0;
     int m_fastMismatch = -1;
 
     std::vector<RefineNote> m_refineNotes;
@@ -314,6 +331,67 @@ private:
     Phase m_lastSavePhase = Phase::Idle;
     bool m_lastSaveValid = false;
 
+    std::unique_ptr<Planner> m_planner;
+    bool m_plannerOn = false;
+    bool m_plannerPaused = false;
+    int m_plannerPauseTick = 0;
+    int m_plannerMarkTick = 0;
+    uint64_t m_plannerMarkBacktracks = 0;
+    int m_plannerPauses = 0;
+    DeathInfo m_deathInfo;
+    bool m_deathInfoSet = false;
+    bool m_obsPending = false;
+    int m_obsTick = 0;
+    uint8_t m_obsHeld = 0;
+    bool m_obsHalted = false;
+    bool m_physicsDied = false;
+    int m_obsDeathTick = -1;
+    std::vector<uint8_t> m_hintPath;
+    std::vector<PendingHint> m_pendingHints;
+    uint64_t m_hintJumps = 0;
+    int m_probeFrontier = 0;
+    int m_probeStep = 0;
+    int m_probeCycle = 0;
+    uint64_t m_probeDeaths = 0;
+    uint64_t m_probes = 0;
+    int m_quietFrom = 0;
+    int m_quietUntil = 0;
+    uint8_t m_quietModes = 0;
+    double m_rateTicks = 0.0;
+    double m_rateDeaths = 0.0;
+    std::vector<uint8_t> m_cpWanted;
+    std::vector<uint64_t> m_runHashes;
+    std::vector<uint64_t> m_testHashes;
+    std::vector<uint64_t> m_goodHashes;
+    int m_runSuccess = -1;
+    int m_testSuccess = -1;
+    int m_goodSuccess = -1;
+    int m_runSuccessChunk = -1;
+    int m_testSuccessChunk = -1;
+    int m_goodSuccessChunk = -1;
+    bool m_recordHashes = false;
+    uint64_t m_baselinesSkipped = 0;
+    bool m_stagedPolish = false;
+    int m_polishStage = 0;
+    uint64_t m_hintWins = 0;
+    uint64_t m_hintRejects = 0;
+    uint64_t m_deaths = 0;
+    uint64_t m_advisedNodes = 0;
+    uint64_t m_plannedPresses = 0;
+    uint64_t m_polishTicks = 0;
+    uint64_t m_polishBudget = 0;
+    bool m_polishCut = false;
+    bool m_modelTest = false;
+    int m_modelTried = 0;
+    int m_modelAccepted = 0;
+    int m_modelSkipped = 0;
+    uint64_t m_phaseTicks[kPhaseCount] = {};
+    double m_phaseSeconds[kPhaseCount] = {};
+    uint64_t m_cpCreates = 0;
+    uint64_t m_cpLoads = 0;
+    uint64_t m_resets = 0;
+    double m_cpSeconds = 0.0;
+
     StatSnapshot m_stats;
     std::string m_key;
     Chart m_result;
@@ -330,6 +408,30 @@ private:
     double elapsedSeconds() const;
     bool timeUp() const;
     void updateSpeed(Clock::time_point now);
+
+    void syncPlannerLimits();
+    void resetPlannerPause();
+    void updatePlannerPause();
+    void buildPlannerMap();
+    void flushObservation(bool betweenFrames = false);
+    void plannerRestored(int tick);
+    bool tryDeathHint(DeathInfo death, int deathTick, int failNode, int preloadEnd);
+    bool reorderAllowed(int k, int preloadEnd) const;
+    void reorderAt(int k, uint8_t v, int failNode);
+    bool tryProbe(int deathTick, int failNode, int preloadEnd);
+    void resetProbe();
+    void dropHintsFrom(int tick);
+    void checkHintWins(int tick);
+    bool polishBudgetSpent() const;
+    void stopPolish();
+    void startPolishStage(int stage);
+    bool polishNoteWanted(RefineNote const& note) const;
+    void planVerifyCheckpoints();
+    bool recordedBaseline();
+    void endRestoreProbe(bool unchecked = false);
+    void adoptTestHashes(int convergedAt);
+    bool afterRefineBaseline();
+    std::string statsLine() const;
 
     void setMuted(bool muted);
     void inject(int lane, bool down);

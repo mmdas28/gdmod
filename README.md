@@ -66,18 +66,24 @@ Charts are saved per level ID in the mod's save folder: `levels/<level id>/` for
 While solving, the level is hidden and simulated using only the game's own physics, many times faster than real time. The solving screen shows the steps, how far it has got, and the speed. **Cancel** stops it and keeps the progress, so you can **Resume** later.
 
 1. **Test.** Checks that fast simulation and rolling back to saved states match the real game exactly on this level, and picks the fastest safe mode.
-2. **Search.** A depth-first search over the button state at every physics tick (240 per second). States that always lead to death are remembered and never tried again.
+2. **Plan** ("Plan inputs from the level's hitboxes", on by default). The solver reads every hitbox in the level: blocks, spikes, portals, pads, orbs and speed changes. It learns how each game mode moves from the first ticks it plays, using Geometry Dash's own formulas only as a starting guess. Then it plans ahead:
+   - **Cube:** each jump goes in the middle of the window of ticks where it is safe. It looks several jumps ahead, so a jump that only matters later isn't missed.
+   - **Ship, wave and UFO:** a look-ahead search through the corridor that keeps a safe distance from the walls and changes input as rarely as it can.
+   - **Moving blocks:** they are tracked as they move.
+
+   The game only has to confirm the plan. When a planned input still dies, the planner works out which earlier input caused it and plans again from there; the search below takes over only where the plan can't help. In tests on Stereo Madness–like levels, this brought solving from about 8 minutes of game time down to about 3 seconds.
+3. **Search.** A depth-first search over the button state at every physics tick (240 per second). It tries the plan's input first. States that always lead to death are remembered and never tried again.
    - **No spam clicking.** In cube, ball, UFO, robot, spider and swing the default is *not* pressing, so the solver only clicks when a click is needed. In ship and wave it keeps the current input and only changes it when it has to.
    - **Ships and waves.** Nearly identical ship, wave, UFO and swing positions are treated as the same state ("Ship/wave search precision: Fast"). This turns the search into pathfinding on a grid and stops it from getting stuck on long ship sections.
    - **Human-playable timing.** Ship and wave holds and gaps have a minimum length (settings).
    - **Stepping up only where needed.** If a section can't be solved, the solver retries that section with a finer position comparison, then with relaxed timing limits (if "Relax these limits when a section needs it" is on), and only then with exact positions. It also steps up when it makes no progress for a while (15 seconds, or 1/12 of the time limit if that is longer). Once it is past the hard section, it goes back to the fast settings.
    - **Progress is saved** every 45 seconds, when you pause, cancel or quit, and when the time limit runs out (not during the first few seconds of testing). Only time spent solving counts toward the time limit, not time paused. A solve that proves there is no path doesn't leave anything to resume.
-3. **Check.** The path is replayed from a clean restart. If it dies anywhere, the search resumes a little before that point.
-4. **Clean up.** Each click is tested: it is removed if it isn't needed, taps are shortened to what matters, and repeated clicks are turned into one hold when holding plays exactly the same ("Prefer holding over repeated clicks"). Ship and wave holds with gaps shorter than "Join ship/wave inputs closer than" are joined.
-5. **Center.** Each note is moved to the middle of the range of ticks where the level still plays out the same, so the chart is as forgiving as possible.
+4. **Check.** The path is replayed from a clean restart. If it dies anywhere, the search resumes a little before that point.
+5. **Clean up.** Each click is tested: it is removed if it isn't needed, taps are shortened to what matters, and repeated clicks are turned into one hold when holding plays exactly the same ("Prefer holding over repeated clicks"). Ship and wave holds with gaps shorter than "Join ship/wave inputs closer than" are joined.
+6. **Center.** Each note is moved to the middle of the range of ticks where the level still plays out the same, so the chart is as forgiving as possible.
 
-   Clean up and Center are skipped in exact replay mode (used when rolling back to saved states isn't exact on a level), and both stop early when their share of the time runs out (together at most 3/4 of the time limit, at least 30 s).
-6. **Final check.** The finished chart is replayed from a clean restart with nothing skipped. If the cleaned-up chart fails, the original verified chart is used instead. A chart that fails its final check is never saved as complete.
+   Clean up and Center are skipped in exact replay mode (used when rolling back to saved states isn't exact on a level), and both stop early when their share of the time runs out (together at most 3/4 of the time limit, at least 30 s). With the planner on, they also share a budget of simulated ticks (about 3/4 of the level's length), because planned presses are already placed in the middle of their windows.
+7. **Final check.** The finished chart is replayed from a clean restart with nothing skipped. If the cleaned-up chart fails, the original verified chart is used instead. A chart that fails its final check is never saved as complete.
 
 Only one level can be simulated at a time: Geometry Dash's engine runs a level on one thread, and running extra copies of the game in the background would put your save file and other mods at risk. The speed comes from the smarter search instead.
 
@@ -95,7 +101,7 @@ Everything is in the mod's settings (Geode → Rhythm Path → Settings, or **Cu
 | Group | Examples |
 |---|---|
 | General | Show the menu on level open, auto-solve, show the chart |
-| Solver | Time limit, solving screen frame rate (60 by default; the solver works for about 85% of each frame), ship/wave precision, clean-up, holds instead of repeated clicks, centering |
+| Solver | Plan inputs from the level's hitboxes, time limit, solving screen frame rate (60 by default; the solver works for about 85% of each frame), ship/wave precision, clean-up, holds instead of repeated clicks, centering |
 | Human-playable timing | Shortest ship/wave hold and gap, other modes |
 | When the chart shows | Default percent range |
 | Look | Theme (Clean, Neon, Pastel, Mono, Classic) or custom colors (their alpha sets how see-through the notes are), note shape, glow, key markers, lane labels |

@@ -13,11 +13,12 @@ A menu shows the chart saved for this level (per level ID and start position) an
 
 ## How it solves
 
-1. **Search.** The level is hidden and simulated using only the game's own physics, many times faster than real time. The solver only clicks when a click is needed. Ships and waves are searched on a grid of positions, so long ship sections don't get it stuck. Progress is saved, so a stopped solve can be resumed.
-2. **Check.** The path is replayed from a clean restart. If it dies, the search continues from just before that point.
-3. **Clean up.** Clicks that aren't needed are removed, taps are shortened, and repeated clicks become holds when holding plays the same.
-4. **Center.** Every input is moved to the middle of the range of ticks that still works.
-5. **Final check.** The finished chart is replayed with nothing skipped before it is saved as complete.
+1. **Plan.** The solver reads every hitbox in the level and learns how each game mode moves. It then plans the inputs: cube jumps in the middle of their safe window, and ship, wave and UFO paths through their corridors. The game only has to confirm the plan, so levels like Stereo Madness solve in seconds.
+2. **Search.** Wherever the plan needs help, the level is hidden and simulated using only the game's own physics, many times faster than real time. The solver only clicks when a click is needed, and progress is saved, so a stopped solve can be resumed.
+3. **Check.** The path is replayed from a clean restart. If it dies, the search continues from just before that point.
+4. **Clean up.** Clicks that aren't needed are removed, taps are shortened, and repeated clicks become holds when holding plays the same.
+5. **Center.** Every input is moved to the middle of the range of ticks that still works.
+6. **Final check.** The finished chart is replayed with nothing skipped before it is saved as complete.
 
 ## Playing
 

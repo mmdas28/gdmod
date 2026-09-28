@@ -28,6 +28,22 @@ constexpr auto kAutoSaveInterval = std::chrono::seconds(45);
 constexpr auto kLogInterval = std::chrono::seconds(10);
 constexpr double kMaxFrameGapSeconds = 0.1;
 constexpr double kMaxGameFrameMs = 100.0;
+constexpr int kMaxHintTicks = 600;
+constexpr uint64_t kPlannerStallBacktracks = 300;
+constexpr int kPlannerResumeTicks = 240;
+constexpr uint64_t kMinPolishTicks = 15000;
+constexpr int kProbeMinTicks = 2;
+constexpr double kProbeGrowth = 1.41;
+constexpr int kProbeMaxTicks = 600;
+constexpr int kProbeCycles = 4;
+constexpr int kProbeMaxCycles = 64;
+constexpr uint64_t kProbeSparseDeaths = 4;
+constexpr int kProbeScan = 8;
+constexpr int kSparseVerifyInterval = 240;
+constexpr int kMaxAdaptiveCpInterval = 64;
+constexpr double kRateWindowTicks = 4800.0;
+constexpr int kPolishStages = 5;
+constexpr int kRestoreProbeTicks = 60;
 
 constexpr uint8_t kFamShip = 1;
 constexpr uint8_t kFamWave = 2;
@@ -116,9 +132,19 @@ float cleanPercent(float value, float fallback) {
     return std::isfinite(value) ? std::clamp(value, 0.f, 100.f) : fallback;
 }
 
+template <class M>
+bool boolSetting(M* mod, std::string_view key, bool fallback) {
+    if constexpr (requires { mod->hasSetting(key); }) {
+        if (!mod->hasSetting(key)) return fallback;
+    }
+    return mod->template getSettingValue<bool>(key);
 }
 
-Solver::Solver(PlayLayer* layer, LevelRef ref) : m_layer(layer), m_ref(std::move(ref)) {}
+}
+
+Solver::Solver(PlayLayer* layer, LevelRef ref) : m_layer(layer), m_ref(std::move(ref)) {
+    m_planner = std::make_unique<Planner>(layer);
+}
 
 Solver::~Solver() {
     releaseAllCheckpoints();
@@ -165,6 +191,7 @@ void Solver::readSettings() {
     for (int i = 0; i < 3; i++) m_constraintCap = std::max({m_constraintCap, m_minHold[i], m_minRelease[i]});
     m_constraintsActive = m_constraintCap > 1;
     m_verifyCpInterval = (m_refineEnabled || m_optimizeEnabled) ? 24 : 60;
+    m_plannerOn = boolSetting(mod, "use-planner", true);
 }
 
 void Solver::buildLadder() {
@@ -305,6 +332,7 @@ void Solver::escalate() {
     }
     auto const& step = currentStep();
     m_finestTier = std::max(m_finestTier, step.tier);
+    syncPlannerLimits();
     log::info(
         "Solver: stuck before tick {}, retrying from tick {} with {} ship/wave precision{} (level {}/{})",
         m_maxTick, m_path.size(), tierName(step.tier),
@@ -320,7 +348,71 @@ void Solver::deescalate() {
     m_preloadEnd = 0;
     m_dead.clear();
     for (auto& node : m_path) node.hash = 0;
+    syncPlannerLimits();
     log::info("Solver: passed the hard section (tick {}), back to {} precision", m_maxTick, tierName(currentStep().tier));
+}
+
+void Solver::syncPlannerLimits() {
+    if (!m_plannerOn) return;
+    PlannerLimits limits;
+    limits.active = currentStep().constraints && m_constraintsActive;
+    for (int i = 0; i < 3; i++) {
+        limits.minHold[i] = m_minHold[i];
+        limits.minRelease[i] = m_minRelease[i];
+    }
+    limits.inputResolution = m_inputResolution;
+    m_planner->setLimits(limits);
+}
+
+void Solver::buildPlannerMap() {
+    if (m_plannerOn) m_planner->buildMap();
+}
+
+void Solver::flushObservation(bool betweenFrames) {
+    if (!m_obsPending) return;
+    m_obsPending = false;
+    bool died = m_physicsDied;
+    m_physicsDied = false;
+    if (died) {
+        m_obsHalted = true;
+        m_obsDeathTick = m_obsTick;
+    }
+    m_planner->observe(m_obsTick, m_obsHeld, died, betweenFrames);
+}
+
+void Solver::plannerRestored(int tick) {
+    m_obsPending = false;
+    m_obsHalted = false;
+    m_physicsDied = false;
+    m_obsDeathTick = -1;
+    if (m_plannerOn) m_planner->onRestore(tick);
+}
+
+void Solver::resetPlannerPause() {
+    m_plannerPaused = false;
+    m_plannerPauseTick = 0;
+    m_plannerMarkTick = m_maxTick;
+    m_plannerMarkBacktracks = m_backtracks;
+}
+
+void Solver::updatePlannerPause() {
+    if (!m_plannerOn) return;
+    if (m_maxTick > m_plannerMarkTick) {
+        m_plannerMarkTick = m_maxTick;
+        m_plannerMarkBacktracks = m_backtracks;
+    }
+    if (m_plannerPaused) {
+        if (m_maxTick >= m_plannerPauseTick + kPlannerResumeTicks) {
+            resetPlannerPause();
+            log::info("Solver: past tick {}, using the planner again", m_maxTick);
+        }
+        return;
+    }
+    if (m_backtracks - m_plannerMarkBacktracks < kPlannerStallBacktracks) return;
+    m_plannerPaused = true;
+    m_plannerPauseTick = m_maxTick;
+    m_plannerPauses++;
+    log::info("Solver: the planner is not helping before tick {}, searching without it until past tick {}", m_maxTick, m_maxTick + kPlannerResumeTicks);
 }
 
 uint64_t Solver::portalKey(PlayerObject* player) const {
@@ -461,6 +553,7 @@ bool Solver::changeBreaksTiming(int tick, uint8_t modes, uint8_t held) const {
 
 void Solver::seedPath(std::vector<uint8_t> const& seq, int length) {
     m_path.clear();
+    m_pendingHints.clear();
     int count = std::min(length, static_cast<int>(seq.size()));
     if (count <= 0) return;
     m_path.reserve(static_cast<size_t>(count));
@@ -479,6 +572,7 @@ void Solver::seedPath(std::vector<uint8_t> const& seq, int length) {
 
 void Solver::cutPreload(int tick) {
     log::info("Solver: the saved path is faster than the current timing limits at tick {}, searching on from there", tick);
+    dropHintsFrom(tick);
     m_path.resize(static_cast<size_t>(tick) + 1);
     auto& node = m_path[tick];
     node.held = node.def;
@@ -529,6 +623,11 @@ void Solver::onPause() {
 
 void Solver::updateCheckpointInterval() {
     double ratio = m_cpCostUs / std::max(1.0, m_stepCostUs);
+    if (m_plannerOn) {
+        double rate = (m_rateDeaths + 1.0) / (m_rateTicks + 240.0);
+        m_searchCpInterval = static_cast<int>(std::clamp<long>(std::lround(std::sqrt(2.0 * ratio / rate)), 4, kMaxAdaptiveCpInterval));
+        return;
+    }
     m_searchCpInterval = static_cast<int>(std::clamp<long>(std::lround(3.0 * ratio), 4, 32));
 }
 
@@ -541,6 +640,8 @@ void Solver::clearStepFlags() {
     m_deathTick = -1;
     m_prunedAt = -1;
     m_successTick = -1;
+    m_successChunk = -1;
+    m_deathInfoSet = false;
 }
 
 int Solver::nextOption(int tick) const {
@@ -560,6 +661,7 @@ void Solver::start(SolveRequest request) {
     m_request = std::move(request);
     for (auto& v : m_request.importSeq) v = static_cast<uint8_t>(v & 3);
     readSettings();
+    m_planner->setEnabled(m_plannerOn);
 
     float target = m_request.targetPercent;
     m_targetPercent = std::isfinite(target) && target > 0.f ? std::clamp(target, 1.f, 100.f) : 100.f;
@@ -567,6 +669,7 @@ void Solver::start(SolveRequest request) {
     m_twoPlayer = m_layer->m_levelSettings && m_layer->m_levelSettings->m_twoPlayerMode;
     buildLadder();
     buildObjectIndex();
+    syncPlannerLimits();
 
     auto now = Clock::now();
     m_lastLog = now;
@@ -635,15 +738,54 @@ void Solver::start(SolveRequest request) {
     m_refineMoved = 0;
     m_refineRan = false;
     m_stoppedPhase = Phase::Idle;
+    m_deathInfoSet = false;
+    m_pendingHints.clear();
+    m_plannerPaused = false;
+    m_plannerPauseTick = 0;
+    m_plannerMarkTick = 0;
+    m_plannerMarkBacktracks = 0;
+    m_plannerPauses = 0;
+    m_hintJumps = 0;
+    m_hintWins = 0;
+    m_hintRejects = 0;
+    m_probes = 0;
+    m_rateTicks = 0.0;
+    m_rateDeaths = 0.0;
+    m_baselinesSkipped = 0;
+    m_recordHashes = false;
+    m_stagedPolish = false;
+    m_polishStage = 0;
+    m_cpWanted.clear();
+    m_runHashes.clear();
+    m_testHashes.clear();
+    m_goodHashes.clear();
+    resetProbe();
+    m_deaths = 0;
+    m_advisedNodes = 0;
+    m_plannedPresses = 0;
+    m_polishTicks = 0;
+    m_polishBudget = 0;
+    m_polishCut = false;
+    m_modelTest = false;
+    m_modelTried = 0;
+    m_modelAccepted = 0;
+    m_modelSkipped = 0;
+    std::fill(std::begin(m_phaseTicks), std::end(m_phaseTicks), uint64_t{0});
+    std::fill(std::begin(m_phaseSeconds), std::end(m_phaseSeconds), 0.0);
+    m_cpCreates = 0;
+    m_cpLoads = 0;
+    m_resets = 0;
+    m_cpSeconds = 0.0;
     setLayerHidden(true);
 
     log::info(
         "Solver starting for {} ({}, two player: {}, steps/update: {}, input resolution: {}, time limit: {}s, target: {:.0f}%, "
-        "precision: {}, timing limits: {}, search levels: {})",
+        "precision: {}, timing limits: {}, search levels: {}, planner: {})",
         m_key,
         m_request.kind == SolveKind::CheckImport ? "import check" : (m_resumed ? "resumed" : "fresh"),
         m_twoPlayer, m_stepsPerUpdate, m_inputResolution, m_timeLimitSec, m_targetPercent,
-        tierName(m_startTier), m_constraintsActive ? (m_relaxTiming ? "on, relaxed if stuck" : "on") : "off", m_ladder.size()
+        tierName(m_startTier), m_constraintsActive ? (m_relaxTiming ? "on, relaxed if stuck" : "on") : "off", m_ladder.size(),
+        m_plannerOn ? "on" : "off"
     );
 
     m_phase = Phase::SelfTest;
@@ -652,6 +794,11 @@ void Solver::start(SolveRequest request) {
     m_selfTestMismatch = -1;
     m_selfTestCpTick = -1;
     m_selfTestDied = false;
+    m_restoreExact = false;
+    m_restoreBad = false;
+    m_restoreProbe = false;
+    m_probeMismatch = false;
+    m_probeChecked = 0;
     m_fastMismatch = -1;
     releaseAllCheckpoints();
     resetToStart();
@@ -790,10 +937,14 @@ void Solver::runFrame() {
 bool Solver::simulate() {
     int before = m_tick;
     int steps = m_stepsPerUpdate - (((m_tick % m_stepsPerUpdate) + m_stepsPerUpdate) % m_stepsPerUpdate);
+    Phase phase = m_phase;
     auto stepStart = Clock::now();
+    m_chunkLast = before + steps - 1;
     m_inStep = true;
     m_layer->update(static_cast<float>(steps / 240.0));
     m_inStep = false;
+    if (m_obsPending) flushObservation(true);
+    double stepSeconds = std::chrono::duration<double>(Clock::now() - stepStart).count();
     if (m_tick > before) {
         double us = std::chrono::duration<double, std::micro>(Clock::now() - stepStart).count() / (m_tick - before);
         m_stepCostUs = m_stepCostUs * 0.95 + us * 0.05;
@@ -803,6 +954,12 @@ bool Solver::simulate() {
         m_tick--;
     }
     int advanced = m_tick - before;
+    int phaseIndex = std::clamp(static_cast<int>(phase), 0, kPhaseCount - 1);
+    m_phaseSeconds[phaseIndex] += stepSeconds;
+    if (advanced > 0) {
+        m_phaseTicks[phaseIndex] += static_cast<uint64_t>(advanced);
+        if (phase == Phase::Optimize || phase == Phase::Refine) m_polishTicks += static_cast<uint64_t>(advanced);
+    }
     if (advanced <= 0) {
         if (++m_stallFrames > 600) {
             m_failReason = "the game stopped advancing";
@@ -873,6 +1030,8 @@ void Solver::resetToStart() {
     m_tick = 0;
     m_curHeld = 0;
     clearStepFlags();
+    m_resets++;
+    plannerRestored(0);
 }
 
 bool Solver::hasCheckpointWithin(int interval) const {
@@ -908,6 +1067,8 @@ void Solver::createCheckpointHere() {
     m_checkpoints.emplace(m_tick, std::move(cp));
 
     double us = std::chrono::duration<double, std::micro>(Clock::now() - cpStart).count();
+    m_cpCreates++;
+    m_cpSeconds += us * 1e-6;
     m_cpCostUs = m_cpCostUs * 0.8 + us * 0.2;
     if (m_phase == Phase::Search) {
         thinCheckpoints();
@@ -953,6 +1114,7 @@ void Solver::releaseAllCheckpoints() {
 }
 
 void Solver::loadCheckpoint(SavedCheckpoint const& cp) {
+    auto loadStart = Clock::now();
     m_layer->m_queuedButtons.clear();
 
     auto previousCurrent = m_layer->m_currentCheckpoint;
@@ -980,6 +1142,9 @@ void Solver::loadCheckpoint(SavedCheckpoint const& cp) {
     m_curHeld = cp.held;
     m_tick = cp.tick;
     clearStepFlags();
+    m_cpLoads++;
+    m_cpSeconds += std::chrono::duration<double>(Clock::now() - loadStart).count();
+    plannerRestored(cp.tick);
 }
 
 void Solver::restoreTo(int tick) {
@@ -1001,6 +1166,7 @@ void Solver::restoreTo(int tick) {
 }
 
 void Solver::beforeStep(bool halfTick) {
+    if (m_obsPending) flushObservation();
     if (halfTick && !m_sawHalfTick) {
         m_sawHalfTick = true;
         log::warn("Solver: saw a half tick while solving (tick {})", m_tick);
@@ -1065,6 +1231,23 @@ void Solver::beforeStep(bool halfTick) {
             SearchNode node;
             node.hash = h;
             policyAt(t, modes, node.def, node.flips);
+            bool quiet = t >= m_quietFrom && t < m_quietUntil;
+            if (quiet && modes != m_quietModes) {
+                quiet = false;
+                m_quietUntil = t;
+            }
+            if (m_plannerOn && !m_plannerPaused && !m_obsHalted && !quiet) {
+                uint8_t prev = t > 0 && t - 1 < static_cast<int>(m_path.size()) ? m_path[t - 1].held : 0;
+                auto advice = m_planner->advise(t, prev);
+                uint8_t lanes = static_cast<uint8_t>(advice.lanes & node.flips & 3);
+                if (lanes) {
+                    uint8_t def = static_cast<uint8_t>((node.def & ~lanes) | (advice.held & lanes));
+                    m_advisedNodes++;
+                    if (def & lanes & ~prev) m_plannedPresses++;
+                    node.def = def;
+                }
+            }
+            if (m_plannerOn) checkHintWins(t);
             node.held = node.def;
             node.tried = static_cast<uint8_t>(1u << node.def);
             m_path.push_back(node);
@@ -1076,6 +1259,9 @@ void Solver::beforeStep(bool halfTick) {
         case Phase::Verify:
         case Phase::FinalVerify: {
             recordLaneModes(t, laneModesNow());
+            if (m_recordHashes && m_phase == Phase::Verify && t >= 0 && t < static_cast<int>(m_runHashes.size())) {
+                m_runHashes[static_cast<size_t>(t)] = exactHash(t);
+            }
             applyHeld(seqAt(m_seq, t));
             break;
         }
@@ -1083,12 +1269,32 @@ void Solver::beforeStep(bool halfTick) {
         case Phase::Refine: {
             if (m_refineStage == RefineStage::Baseline) {
                 if (t >= m_baseFrom && t <= m_baseUntil) {
-                    m_baseHashes[t - m_baseFrom] = exactHash(t);
+                    uint64_t h = exactHash(t);
+                    m_baseHashes[t - m_baseFrom] = h;
+                    if (m_recordHashes && t < static_cast<int>(m_runHashes.size())) {
+                        uint64_t& run = m_runHashes[static_cast<size_t>(t)];
+                        if (m_restoreProbe && run != 0) {
+                            m_probeChecked++;
+                            if (run != h) m_probeMismatch = true;
+                        }
+                        run = h;
+                    }
                 }
                 applyHeld(seqAt(m_seq, t));
             }
             else {
-                if (t >= m_convergeFrom && t >= m_baseFrom && t <= m_baseUntil) {
+                if (m_recordHashes && t >= m_baseFrom && t <= m_baseUntil) {
+                    uint64_t h = exactHash(t);
+                    size_t i = static_cast<size_t>(t - m_baseFrom);
+                    if (i < m_testHashes.size()) m_testHashes[i] = h;
+                    if (t >= m_convergeFrom && m_baseHashes[i] != 0 && h == m_baseHashes[i]) {
+                        m_runConverged = true;
+                        m_convergedAt = t;
+                        m_stopDecisions = true;
+                        break;
+                    }
+                }
+                else if (!m_recordHashes && t >= m_convergeFrom && t >= m_baseFrom && t <= m_baseUntil) {
                     uint64_t base = m_baseHashes[t - m_baseFrom];
                     if (base != 0 && exactHash(t) == base) {
                         m_runConverged = true;
@@ -1107,6 +1313,7 @@ void Solver::beforeStep(bool halfTick) {
 }
 
 void Solver::afterStep(bool) {
+    bool observed = !m_stopDecisions;
     if (m_diedThisStep) {
         m_diedThisStep = false;
         if (!m_stopDecisions) {
@@ -1120,6 +1327,7 @@ void Solver::afterStep(bool) {
         if (!m_stopDecisions) {
             m_success = true;
             m_successTick = m_tick;
+            m_successChunk = m_chunkLast;
             m_stopDecisions = true;
         }
     }
@@ -1127,13 +1335,36 @@ void Solver::afterStep(bool) {
         m_layer->getCurrentPercent() >= m_targetPercent) {
         m_success = true;
         m_successTick = m_tick;
+        m_successChunk = m_chunkLast;
         m_stopDecisions = true;
+    }
+    if (m_plannerOn && observed && !m_obsHalted) {
+        if (m_obsPending) flushObservation();
+        m_obsPending = true;
+        m_obsTick = m_tick;
+        m_obsHeld = m_curHeld;
     }
     m_tick++;
 }
 
-void Solver::onPlayerDestroyed() {
-    if (running() && m_inStep) m_diedThisStep = true;
+void Solver::onPlayerDestroyed(PlayerObject* player, GameObject* object) {
+    if (!running() || !m_inStep) return;
+    m_diedThisStep = true;
+    if (!m_plannerOn) return;
+    m_physicsDied = true;
+    if (m_deathInfoSet) return;
+    DeathInfo info;
+    info.tick = m_tick;
+    if (object) {
+        info.kind = DeathKind::Hazard;
+        info.hasRect = true;
+        info.rect = object->getObjectRect();
+        info.objectType = static_cast<int>(object->m_objectType);
+        info.objectID = object->m_objectID;
+    }
+    info.player2 = player && m_layer && player == m_layer->m_player2;
+    m_deathInfo = info;
+    m_deathInfoSet = true;
 }
 
 void Solver::onLevelComplete() {
@@ -1192,6 +1423,7 @@ bool Solver::advanceSelfTest() {
     if (m_selfTestStage == 1) {
         if (m_selfTestMismatch < 0) {
             log::info("Solver self-test: checkpoint restore reproduces the game exactly");
+            m_restoreExact = true;
         }
         else if (m_selfTestMismatch <= m_selfTestCpTick + 2) {
             log::warn("Solver self-test: checkpoint restore diverges immediately (tick {}), using exact replay mode", m_selfTestMismatch);
@@ -1223,6 +1455,7 @@ void Solver::beginAfterSelfTest() {
         m_fromImport = true;
         m_maxPercent = 0.f;
         beginVerify(std::move(seq), Phase::Verify);
+        buildPlannerMap();
         return;
     }
     if (m_resumed && m_request.progress) {
@@ -1264,6 +1497,8 @@ void Solver::resumeFrom(SolveProgress const& progress) {
         m_replayFromRepair = adoptedReplay;
         log::info("Solver: resuming with a found path ({} ticks), checking it again", seq.size());
         beginVerify(std::move(seq), Phase::Verify);
+        buildPlannerMap();
+        syncPlannerLimits();
         return;
     }
 
@@ -1272,6 +1507,7 @@ void Solver::resumeFrom(SolveProgress const& progress) {
     if (sameSettings && validLevel) {
         m_level = progress.escalation;
         m_finestTier = std::max(m_finestTier, currentStep().tier);
+        syncPlannerLimits();
     }
     bool keepClaims = !progress.pathFound && sameSettings && progress.escalation == m_level &&
         progress.fastAllowed == m_fastAllowed && progress.replayMode == (m_restoreMode == RestoreMode::Replay);
@@ -1316,7 +1552,9 @@ void Solver::resumeFrom(SolveProgress const& progress) {
 void Solver::beginSearchFresh() {
     releaseAllCheckpoints();
     resetToStart();
+    buildPlannerMap();
     m_path.clear();
+    m_pendingHints.clear();
     m_dead.clear();
     m_best.clear();
     m_laneModes.clear();
@@ -1332,6 +1570,9 @@ void Solver::beginSearchFresh() {
     m_preloadTiming = false;
     markProgress();
     m_finestTier = currentStep().tier;
+    syncPlannerLimits();
+    resetPlannerPause();
+    resetProbe();
     m_phase = Phase::Search;
     if (m_restoreMode == RestoreMode::Checkpoint) createCheckpointHere();
 }
@@ -1364,9 +1605,17 @@ bool Solver::advanceSearch() {
     if (m_restoreMode == RestoreMode::Checkpoint && !hasCheckpointWithin(m_searchCpInterval)) {
         createCheckpointHere();
     }
+    int ticksBefore = m_tick;
     bool advanced = simulate();
     if (advanced && !m_stopDecisions) {
         m_maxPercent = std::max(m_maxPercent, m_layer->getCurrentPercent());
+    }
+    if (m_plannerOn && m_tick > ticksBefore) {
+        m_rateTicks += m_tick - ticksBefore;
+        if (m_rateTicks > kRateWindowTicks) {
+            m_rateTicks *= 0.5;
+            m_rateDeaths *= 0.5;
+        }
     }
     return advanced;
 }
@@ -1374,7 +1623,12 @@ bool Solver::advanceSearch() {
 void Solver::handleSearchDeath() {
     bool pruned = m_prunedAt >= 0;
     int failNode = pruned ? m_prunedAt - 1 : m_deathTick;
+    int deathTick = m_deathTick;
+    int preloadEnd = m_preloadEnd;
+    DeathInfo death = m_deathInfoSet ? m_deathInfo : DeathInfo{};
     if (pruned) m_prunes++;
+    else m_deaths++;
+    if (m_plannerOn) m_rateDeaths += 1.0;
     clearStepFlags();
 
     m_preloadEnd = 0;
@@ -1394,7 +1648,127 @@ void Solver::handleSearchDeath() {
         stopWithBest();
         return;
     }
+    updatePlannerPause();
+    if (!pruned && m_plannerOn && !m_plannerPaused && tryDeathHint(death, deathTick, failNode, preloadEnd)) return;
+    if (!pruned && m_plannerOn && tryProbe(deathTick, failNode, preloadEnd)) return;
     dfsBacktrack(failNode);
+}
+
+bool Solver::tryDeathHint(DeathInfo death, int deathTick, int failNode, int preloadEnd) {
+    if (deathTick < 0 || failNode < 0 || m_path.empty()) return false;
+    death.tick = m_obsDeathTick >= 0 && m_obsDeathTick <= deathTick ? m_obsDeathTick : deathTick;
+    size_t count = std::min(m_path.size(), static_cast<size_t>(deathTick) + 1);
+    m_hintPath.clear();
+    m_hintPath.reserve(count);
+    for (size_t i = 0; i < count; i++) m_hintPath.push_back(m_path[i].held);
+    auto hint = m_planner->onDeath(death, m_hintPath);
+    if (!hint) return false;
+    int k = hint->tick;
+    uint8_t v = hint->held;
+    int size = static_cast<int>(m_path.size());
+    int floor = 0;
+    for (auto const& pending : m_pendingHints) {
+        if (pending.tick < deathTick && deathTick < pending.death) floor = std::max(floor, pending.tick);
+    }
+    bool legal = k >= 0 && k < size && k <= deathTick && deathTick - k <= kMaxHintTicks && (v & ~3) == 0 && k >= floor;
+    if (legal) {
+        auto const& node = m_path[k];
+        legal = reorderAllowed(k, preloadEnd) && ((v ^ node.def) & ~node.flips & 3) == 0 && v != node.held &&
+            !(node.tried & (1u << v)) && !(k == 0 && k < failNode && m_fromImport);
+    }
+    if (!legal) {
+        m_hintRejects++;
+        return false;
+    }
+    int deadNode = m_obsDeathTick >= 0 && m_obsDeathTick < failNode ? m_obsDeathTick : failNode;
+    reorderAt(k, v, k >= deadNode ? k : failNode);
+    m_hintJumps++;
+    m_pendingHints.push_back({k, deathTick});
+    restoreTo(k);
+    return true;
+}
+
+bool Solver::reorderAllowed(int k, int preloadEnd) const {
+    if (k < 0 || k >= static_cast<int>(m_path.size())) return false;
+    if (m_preloadTiming && k < preloadEnd) return false;
+    auto const& node = m_path[k];
+    int base = m_level == 0 ? m_maxTick : std::min(m_maxTick, m_levelBase);
+    return !node.seeded && !node.reordered && !(base - k > kEscalateTicks && canEscalate()) && m_maxTick - k <= m_maxBacktrackTicks;
+}
+
+void Solver::reorderAt(int k, uint8_t v, int failNode) {
+    m_path.resize(static_cast<size_t>(k) + 1);
+    auto& node = m_path.back();
+    if (k < failNode) {
+        uint8_t current = static_cast<uint8_t>(node.held & 3);
+        node.tried = static_cast<uint8_t>((node.tried & ~(1u << current)) | (1u << v));
+        node.reordered = true;
+    }
+    else {
+        node.tried = static_cast<uint8_t>(node.tried | (1u << v));
+    }
+    node.held = v;
+    if (k == 0) m_fromImport = false;
+    m_backtracks++;
+    dropHintsFrom(k);
+}
+
+void Solver::resetProbe() {
+    m_probeFrontier = m_maxTick;
+    m_probeStep = 0;
+    m_probeCycle = 0;
+    m_probeDeaths = 0;
+    m_quietFrom = 0;
+    m_quietUntil = 0;
+    m_quietModes = 0;
+}
+
+bool Solver::tryProbe(int deathTick, int failNode, int preloadEnd) {
+    if (deathTick < 0 || failNode <= 0 || m_path.empty()) return false;
+    if (m_maxTick > m_probeFrontier) resetProbe();
+    m_probeDeaths++;
+    if (m_probeCycle >= kProbeCycles && m_probeDeaths < kProbeSparseDeaths << std::min(m_probeCycle - kProbeCycles, 20)) return false;
+    while (m_probeCycle < kProbeMaxCycles) {
+        double scale = m_probeCycle % 2 ? std::sqrt(kProbeGrowth) : 1.0;
+        int dist = static_cast<int>(std::lround(kProbeMinTicks * std::pow(kProbeGrowth, m_probeStep) * scale));
+        if (dist > kProbeMaxTicks) {
+            m_probeCycle++;
+            m_probeStep = 0;
+            continue;
+        }
+        m_probeStep++;
+        int from = std::min(failNode - dist, static_cast<int>(m_path.size()) - 1);
+        for (int k = from; k >= 0 && k > from - kProbeScan; k--) {
+            if (!reorderAllowed(k, preloadEnd)) continue;
+            if (k == 0 && m_fromImport) continue;
+            int next = nextOption(k);
+            if (next < 0) continue;
+            reorderAt(k, static_cast<uint8_t>(next), failNode);
+            m_probes++;
+            m_probeDeaths = 0;
+            if (m_probeStep % 2) {
+                m_quietFrom = k + 1;
+                m_quietUntil = m_probeFrontier + 1;
+                m_quietModes = laneModesAt(k);
+            }
+            else {
+                m_quietFrom = 0;
+                m_quietUntil = 0;
+            }
+            restoreTo(k);
+            return true;
+        }
+    }
+    return false;
+}
+
+void Solver::dropHintsFrom(int tick) {
+    std::erase_if(m_pendingHints, [tick](PendingHint const& hint) { return hint.tick >= tick; });
+}
+
+void Solver::checkHintWins(int tick) {
+    auto won = std::erase_if(m_pendingHints, [tick](PendingHint const& hint) { return tick > hint.death + 1; });
+    m_hintWins += static_cast<uint64_t>(won);
 }
 
 void Solver::dfsBacktrack(int failNode) {
@@ -1410,12 +1784,14 @@ void Solver::dfsBacktrack(int failNode) {
             node.tried = static_cast<uint8_t>(node.tried | (1u << next));
             if (t == 0) m_fromImport = false;
             m_backtracks++;
+            dropHintsFrom(t);
             restoreTo(t);
             return;
         }
         auto const& popped = m_path.back();
         if (popped.hash != 0 && !popped.seeded) m_dead.insert(popped.hash);
         m_path.pop_back();
+        if (!m_pendingHints.empty()) dropHintsFrom(t);
         int base = m_level == 0 ? m_maxTick : std::min(m_maxTick, m_levelBase);
         if (base - t > kEscalateTicks && canEscalate()) {
             escalate();
@@ -1494,6 +1870,18 @@ void Solver::onSearchSuccess() {
 void Solver::beginVerify(std::vector<uint8_t> seq, Phase phase) {
     m_seq = std::move(seq);
     m_phase = phase;
+    if (phase == Phase::Verify) {
+        bool probe = !m_restoreExact && !m_restoreBad && m_selfTestMismatch < 0;
+        m_recordHashes = m_plannerOn && m_restoreMode == RestoreMode::Checkpoint && (m_restoreExact || probe);
+        m_restoreProbe = m_recordHashes && !m_restoreExact;
+        m_probeMismatch = false;
+        m_probeChecked = 0;
+        m_runSuccess = -1;
+        m_runSuccessChunk = -1;
+        m_runHashes.clear();
+        if (m_recordHashes) m_runHashes.assign(m_seq.size() + static_cast<size_t>(kVerifyGraceTicks) + 8, 0);
+        planVerifyCheckpoints();
+    }
     releaseAllCheckpoints();
     resetToStart();
     if (phase == Phase::Verify && m_restoreMode == RestoreMode::Checkpoint) createCheckpointHere();
@@ -1512,8 +1900,19 @@ bool Solver::advanceVerify() {
         onVerifyFailed(static_cast<int>(m_seq.size()));
         return running();
     }
-    if (m_phase == Phase::Verify && m_restoreMode == RestoreMode::Checkpoint && !hasCheckpointWithin(m_verifyCpInterval)) {
-        createCheckpointHere();
+    if (m_phase == Phase::Verify && m_restoreMode == RestoreMode::Checkpoint) {
+        if (!m_cpWanted.empty()) {
+            int spu = std::max(1, m_stepsPerUpdate);
+            int steps = spu - (((m_tick % spu) + spu) % spu);
+            bool want = !hasCheckpointWithin(kSparseVerifyInterval);
+            for (int t = std::max(m_tick, 0); !want && t < m_tick + steps && t < static_cast<int>(m_cpWanted.size()); t++) {
+                if (m_cpWanted[static_cast<size_t>(t)]) want = !hasCheckpointWithin(1);
+            }
+            if (want) createCheckpointHere();
+        }
+        else if (!hasCheckpointWithin(m_verifyCpInterval)) {
+            createCheckpointHere();
+        }
     }
     return simulate();
 }
@@ -1524,6 +1923,8 @@ void Solver::onVerifySuccess() {
         m_seq.resize(static_cast<size_t>(m_successTick) + 1);
     }
     if (m_phase == Phase::Verify) {
+        m_runSuccess = m_recordHashes ? m_successTick : -1;
+        m_runSuccessChunk = m_recordHashes ? m_successChunk : -1;
         log::info("Solver: path verified from a clean restart{}", m_importChecking ? " (imported inputs)" : "");
         m_importChecking = false;
         m_verifiedSeq = m_seq;
@@ -1534,6 +1935,15 @@ void Solver::onVerifySuccess() {
         m_refineRan = false;
         m_finalIsEdited = false;
         m_polishDeadline = runSeconds() + std::max(30.0, 0.75 * m_timeLimitSec);
+        m_polishTicks = 0;
+        m_polishBudget = std::max<uint64_t>(kMinPolishTicks, static_cast<uint64_t>(m_seq.size()) * 3 / 4);
+        m_polishCut = false;
+        m_stagedPolish = m_plannerOn && m_restoreMode == RestoreMode::Checkpoint;
+        m_polishStage = 0;
+        if (m_stagedPolish) {
+            startPolishStage(0);
+            return;
+        }
         if (m_restoreMode == RestoreMode::Checkpoint && m_optimizeEnabled) {
             beginOptimize();
             return;
@@ -1568,6 +1978,7 @@ void Solver::onVerifyFailed(int tick) {
                 m_fastAllowed = false;
                 m_dead.clear();
                 m_path.clear();
+                m_pendingHints.clear();
             }
             m_phase = Phase::Verify;
             m_seq = m_verifiedSeq;
@@ -1649,6 +2060,7 @@ void Solver::onVerifyFailed(int tick) {
 
     int rewind = std::clamp(tick - kRepairRewindTicks, 0, static_cast<int>(m_path.size()));
     m_path.resize(static_cast<size_t>(rewind));
+    dropHintsFrom(rewind);
     if (m_path.empty()) m_fromImport = false;
     m_maxTick = rewind;
     m_preloadEnd = 0;
@@ -1657,6 +2069,8 @@ void Solver::onVerifyFailed(int tick) {
         m_levelBase = rewind;
     }
     markProgress();
+    resetPlannerPause();
+    resetProbe();
     m_phase = Phase::Search;
     m_finestTier = std::max(m_finestTier, currentStep().tier);
     restoreTo(rewind);
@@ -1746,10 +2160,115 @@ bool Solver::joinAllowed(RefineNote const& note, RefineNote const& next) const {
     return m_preferHolds && gap <= kJoinGapTicks;
 }
 
+void Solver::planVerifyCheckpoints() {
+    m_cpWanted.clear();
+    if (!m_plannerOn || m_restoreMode != RestoreMode::Checkpoint || !(m_optimizeEnabled || m_refineEnabled)) return;
+    int n = static_cast<int>(m_seq.size());
+    m_cpWanted.assign(static_cast<size_t>(n) + 1, 0);
+    auto mark = [&](int t) {
+        if (t >= 0 && t <= n) m_cpWanted[static_cast<size_t>(t)] = 1;
+    };
+    for (int t = 0; t < n; t++) {
+        uint8_t prev = t > 0 ? m_seq[static_cast<size_t>(t) - 1] : 0;
+        uint8_t cur = m_seq[static_cast<size_t>(t)];
+        if (cur & ~prev & 3) {
+            mark(t - 1);
+            mark(t - 1 - m_refineWindow);
+        }
+        if (prev & ~cur & 3) mark(t - 1);
+    }
+}
+
+void Solver::startPolishStage(int stage) {
+    for (m_polishStage = stage; m_polishStage < kPolishStages; m_polishStage++) {
+        bool optimize = m_polishStage == 0 || m_polishStage == 1 || m_polishStage == 3;
+        if (optimize && m_optimizeEnabled) {
+            beginOptimize();
+            return;
+        }
+        if (!optimize && m_refineEnabled) {
+            beginRefine();
+            return;
+        }
+    }
+    startFinalCheck();
+}
+
+bool Solver::polishNoteWanted(RefineNote const& note) const {
+    if (!m_stagedPolish) return true;
+    bool continuous = continuousAt(note.lane, note.start);
+    switch (m_polishStage) {
+        case 0:
+        case 2: return !continuous;
+        case 1:
+        case 4: return continuous;
+        default: return true;
+    }
+}
+
+void Solver::endRestoreProbe(bool unchecked) {
+    if (!m_restoreProbe) return;
+    if (m_probeMismatch || unchecked) {
+        if (m_probeMismatch) log::warn("Solver: checkpoint restores do not reproduce the verified run; polish compares restored runs");
+        m_restoreProbe = false;
+        m_restoreBad = true;
+        m_recordHashes = false;
+        m_runHashes.clear();
+        m_runSuccess = -1;
+        m_runSuccessChunk = -1;
+    }
+    else if (m_probeChecked >= kRestoreProbeTicks) {
+        m_restoreProbe = false;
+        m_restoreExact = true;
+    }
+}
+
+bool Solver::recordedBaseline() {
+    if (!m_recordHashes || m_restoreProbe || m_runSuccess < 0 || m_baseFrom < 0 || m_baseUntil < m_baseFrom) return false;
+    int spu = std::max(1, m_stepsPerUpdate);
+    int simEnd = (m_baseUntil / spu + 1) * spu - 1;
+    bool completes = m_runSuccessChunk >= 0 && m_runSuccessChunk <= simEnd;
+    int last = completes ? std::min(m_baseUntil, m_runSuccess) : m_baseUntil;
+    if (last >= static_cast<int>(m_runHashes.size())) return false;
+    for (int t = m_baseFrom; t <= last; t++) {
+        if (m_runHashes[static_cast<size_t>(t)] == 0) return false;
+    }
+    for (int t = m_baseFrom; t <= last; t++) m_baseHashes[static_cast<size_t>(t - m_baseFrom)] = m_runHashes[static_cast<size_t>(t)];
+    m_baseCompleted = completes;
+    if (completes) m_baseUntil = std::min(m_baseUntil, m_runSuccess);
+    m_baselinesSkipped++;
+    return true;
+}
+
+void Solver::adoptTestHashes(int convergedAt) {
+    endRestoreProbe(true);
+    if (!m_recordHashes) return;
+    int size = static_cast<int>(m_runHashes.size());
+    int from = std::max(m_baseFrom, 0);
+    if (convergedAt < 0 && m_testSuccess < 0) {
+        for (int t = from; t < size; t++) m_runHashes[static_cast<size_t>(t)] = 0;
+        m_runSuccess = -1;
+        m_runSuccessChunk = -1;
+        return;
+    }
+    int end = convergedAt >= 0 ? convergedAt : m_testSuccess + 1;
+    for (int t = from; t < end && t < size; t++) {
+        size_t i = static_cast<size_t>(t - m_baseFrom);
+        m_runHashes[static_cast<size_t>(t)] = i < m_testHashes.size() ? m_testHashes[i] : 0;
+    }
+    if (convergedAt < 0) {
+        for (int t = std::max(end, 0); t < size; t++) m_runHashes[static_cast<size_t>(t)] = 0;
+        m_runSuccess = m_testSuccess;
+        m_runSuccessChunk = m_testSuccessChunk;
+    }
+}
+
 void Solver::beginOptimize() {
+    bool first = !m_stagedPolish || m_polishStage == 0;
+    if (first) buildPlannerMap();
     m_phase = Phase::Optimize;
     m_optDeadline = std::min(runSeconds() + std::max(10.0, m_timeLimitSec / 4.0), m_polishDeadline);
-    m_optEdits = 0;
+    if (first) m_optEdits = 0;
     m_optNotes = notesOf(m_seq);
     m_optCursorStart = -1;
     m_optCursorLane = -1;
@@ -1772,7 +2291,8 @@ void Solver::nextOptNote() {
         m_optCursorStart = note.start;
         m_optCursorLane = note.lane;
         m_optPosition = static_cast<size_t>(index);
-        m_optStep = OptStep::Remove;
+        if (!polishNoteWanted(note)) continue;
+        m_optStep = m_stagedPolish && m_polishStage == 3 ? OptStep::Shorten : OptStep::Remove;
         m_optShortenReady = false;
         m_baseValid = false;
         if (nextOptTest()) return;
@@ -1815,6 +2335,10 @@ bool Solver::nextOptTest() {
                 return launchOptTest(EditKind::Join, std::move(seq), note.end, nextStart);
             }
             case OptStep::Shorten: {
+                if (m_stagedPolish && m_polishStage != 3) {
+                    m_optStep = OptStep::Finished;
+                    continue;
+                }
                 if (!m_optShortenReady) {
                     m_optShortenReady = true;
                     m_optBestConverged = -1;
@@ -1826,6 +2350,9 @@ bool Solver::nextOptTest() {
                     if (m_optHi < note.end && m_optHi > note.start) {
                         auto seq = m_seq;
                         setLane(seq, note.lane, m_optHi, note.end, false);
+                        std::swap(m_testHashes, m_goodHashes);
+                        m_testSuccess = m_goodSuccess;
+                        m_testSuccessChunk = m_goodSuccessChunk;
                         applyOptEdit(std::move(seq), m_optHi, m_optBestConverged);
                     }
                     m_optStep = OptStep::Finished;
@@ -1881,6 +2408,12 @@ bool Solver::startOptBaseline() {
     m_baseHashes.assign(static_cast<size_t>(m_baseUntil - m_baseFrom + 1), 0);
     m_baseCompleted = false;
     m_refineStage = RefineStage::Baseline;
+    if (recordedBaseline()) {
+        m_baseValid = true;
+        if (startTestRun()) return true;
+        m_optStep = OptStep::Finished;
+        return false;
+    }
     loadCheckpoint(it->second);
     return true;
 }
@@ -1888,6 +2421,9 @@ bool Solver::startOptBaseline() {
 bool Solver::startTestRun() {
     auto it = m_checkpoints.find(m_baseFrom);
     if (it == m_checkpoints.end()) return false;
+    if (m_recordHashes) m_testHashes.assign(static_cast<size_t>(m_baseUntil - m_baseFrom + 1), 0);
+    m_testSuccess = -1;
+    m_testSuccessChunk = -1;
     m_runConverged = false;
     m_convergedAt = -1;
     m_refineStage = RefineStage::Test;
@@ -1896,6 +2432,7 @@ bool Solver::startTestRun() {
 }
 
 void Solver::applyOptEdit(std::vector<uint8_t> seq, int changedFrom, int convergedAt) {
+    adoptTestHashes(convergedAt);
     m_seq = std::move(seq);
     m_optEdits++;
     int changedUntil = convergedAt >= 0 ? convergedAt : m_baseUntil;
@@ -1923,6 +2460,11 @@ void Solver::onOptTestResult(bool good) {
             if (good) {
                 m_optHi = m_optTestEnd;
                 m_optBestConverged = m_convergedAt;
+                if (m_recordHashes) {
+                    m_goodHashes = m_testHashes;
+                    m_goodSuccess = m_testSuccess;
+                    m_goodSuccessChunk = m_testSuccessChunk;
+                }
             }
             else {
                 m_optLo = m_optTestEnd + 1;
@@ -1936,8 +2478,15 @@ void Solver::onOptTestResult(bool good) {
 bool Solver::advanceOptimize() {
     if (m_refineStage == RefineStage::Baseline) {
         bool ended = m_pendingDeath || m_success || m_tick > m_baseUntil;
-        if (!ended) return simulate();
+        if (!ended) {
+            if (polishBudgetSpent()) {
+                stopPolish();
+                return running();
+            }
+            return simulate();
+        }
 
+        endRestoreProbe();
         bool died = m_pendingDeath;
         int deathTick = m_deathTick;
         m_baseCompleted = m_success;
@@ -1963,9 +2512,17 @@ bool Solver::advanceOptimize() {
     }
 
     bool ended = m_runConverged || m_pendingDeath || m_success || m_tick > m_baseUntil;
-    if (!ended) return simulate();
+    if (!ended) {
+        if (polishBudgetSpent()) {
+            stopPolish();
+            return running();
+        }
+        return simulate();
+    }
 
     bool good = m_runConverged || (m_success && m_baseCompleted);
+    m_testSuccess = m_success ? m_successTick : -1;
+    m_testSuccessChunk = m_success ? m_successChunk : -1;
     m_pendingDeath = false;
     m_success = false;
     m_stopDecisions = false;
@@ -1974,10 +2531,32 @@ bool Solver::advanceOptimize() {
     return true;
 }
 
+bool Solver::polishBudgetSpent() const {
+    return m_plannerOn && m_polishBudget > 0 && m_polishTicks >= m_polishBudget;
+}
+
+void Solver::stopPolish() {
+    m_polishCut = true;
+    log::info(
+        "Solver: polish budget used ({} of {} ticks), keeping {} cleanups and {} moved notes",
+        m_polishTicks, m_polishBudget, m_optEdits, m_refineMoved
+    );
+    m_optStep = OptStep::Finished;
+    m_confirmingShift = false;
+    m_modelTest = false;
+    m_runConverged = false;
+    clearStepFlags();
+    startFinalCheck();
+}
+
 void Solver::finishOptimize() {
     log::info("Solver: input cleanup made {} changes ({} notes left)", m_optEdits, m_optNotes.size());
     m_optStep = OptStep::Finished;
     m_testSeq.clear();
+    if (m_stagedPolish) {
+        startPolishStage(m_polishStage + 1);
+        return;
+    }
     if (m_restoreMode == RestoreMode::Checkpoint && m_refineEnabled) {
         beginRefine();
         return;
@@ -2003,19 +2582,24 @@ void Solver::beginRefine() {
     m_refineDeadline = std::min(runSeconds() + std::max(20.0, m_timeLimitSec / 2.0), m_polishDeadline);
     m_refineNotes = notesOf(m_seq);
     m_refineIndex = 0;
-    m_refineMoved = 0;
+    if (!m_stagedPolish || m_polishStage == 2) m_refineMoved = 0;
     log::info("Solver: centering {} notes in their timing windows", m_refineNotes.size());
     startRefineNote();
 }
 
 void Solver::startRefineNote() {
     int total = static_cast<int>(m_seq.size());
+    m_modelTest = false;
     while (m_refineIndex < m_refineNotes.size()) {
         if (runSeconds() > m_refineDeadline) {
             log::warn("Solver: timing refinement ran out of time at note {}/{}", m_refineIndex, m_refineNotes.size());
             break;
         }
         auto const& note = m_refineNotes[m_refineIndex];
+        if (!polishNoteWanted(note)) {
+            m_refineIndex++;
+            continue;
+        }
 
         int prevEnd = -1;
         int nextStart = -1;
@@ -2049,12 +2633,50 @@ void Solver::startRefineNote() {
         m_baseHashes.assign(static_cast<size_t>(m_baseUntil - m_baseFrom + 1), 0);
         m_baseCompleted = false;
         m_refineStage = RefineStage::Baseline;
+        if (continuousAt(note.lane, note.start) && recordedBaseline()) {
+            if (afterRefineBaseline()) return;
+            m_refineIndex++;
+            continue;
+        }
         loadCheckpoint(it->second);
         return;
     }
 
     if (m_refineMoved > 0) log::info("Solver: moved {} notes", m_refineMoved);
+    if (m_stagedPolish) {
+        startPolishStage(m_polishStage + 1);
+        return;
+    }
     startFinalCheck();
+}
+
+bool Solver::afterRefineBaseline() {
+    auto const& note = m_refineNotes[m_refineIndex];
+    m_posGood = 0;
+    m_posBad = m_posLimit + 1;
+    m_negGood = 0;
+    m_negBad = m_negLimit - 1;
+    m_confirmingShift = false;
+    if (m_plannerOn) {
+        auto window = m_planner->pressWindow(note.lane, note.start, note.end, m_seq);
+        if (window.valid() && window.lo <= note.start && note.start <= window.hi) {
+            int64_t middle = (static_cast<int64_t>(window.lo) + static_cast<int64_t>(window.hi)) / 2;
+            int64_t wanted = middle - note.start;
+            if (wanted == 0) {
+                m_modelSkipped++;
+                return false;
+            }
+            int shift = static_cast<int>(std::clamp<int64_t>(wanted, m_negLimit, m_posLimit));
+            if (shift != 0 && !shiftBreaksTiming(note, shift)) {
+                m_modelTest = true;
+                m_modelTried++;
+                beginRefineTest(shift);
+                return true;
+            }
+        }
+    }
+    nextRefineTest();
+    return true;
 }
 
 void Solver::beginRefineTest(int shift) {
@@ -2064,6 +2686,9 @@ void Solver::beginRefineTest(int shift) {
     m_convergeFrom = std::max(note.end, note.end + shift) + 1;
     m_runConverged = false;
     m_convergedAt = -1;
+    m_testSuccess = -1;
+    m_testSuccessChunk = -1;
+    if (m_recordHashes) m_testHashes.assign(static_cast<size_t>(m_baseUntil - m_baseFrom + 1), 0);
     m_refineStage = RefineStage::Test;
     auto it = m_checkpoints.find(m_baseFrom);
     if (it == m_checkpoints.end()) {
@@ -2115,6 +2740,7 @@ void Solver::nextRefineTest() {
 }
 
 void Solver::applyRefineShift(int shift) {
+    adoptTestHashes(m_convergedAt);
     auto& note = m_refineNotes[m_refineIndex];
     int changedFrom = std::min(note.start, note.start + shift);
     m_seq = shiftedSeq(note, shift);
@@ -2128,9 +2754,16 @@ void Solver::applyRefineShift(int shift) {
 bool Solver::advanceRefine() {
     if (m_refineStage == RefineStage::Baseline) {
         bool ended = m_pendingDeath || m_success || m_tick > m_baseUntil;
-        if (!ended) return simulate();
+        if (!ended) {
+            if (polishBudgetSpent()) {
+                stopPolish();
+                return running();
+            }
+            return simulate();
+        }
 
         auto const& note = m_refineNotes[m_refineIndex];
+        endRestoreProbe();
         bool died = m_pendingDeath;
         int deathTick = m_deathTick;
         m_baseCompleted = m_success;
@@ -2148,23 +2781,44 @@ bool Solver::advanceRefine() {
             m_baseUntil = std::min(m_baseUntil, deathTick - 1);
         }
 
-        m_posGood = 0;
-        m_posBad = m_posLimit + 1;
-        m_negGood = 0;
-        m_negBad = m_negLimit - 1;
-        m_confirmingShift = false;
-        nextRefineTest();
+        if (!afterRefineBaseline()) {
+            m_refineIndex++;
+            startRefineNote();
+        }
         return true;
     }
 
     bool ended = m_runConverged || m_pendingDeath || m_success || m_tick > m_baseUntil;
-    if (!ended) return simulate();
+    if (!ended) {
+        if (polishBudgetSpent()) {
+            stopPolish();
+            return running();
+        }
+        return simulate();
+    }
 
     bool good = m_runConverged || (m_success && m_baseCompleted);
+    m_testSuccess = m_success ? m_successTick : -1;
+    m_testSuccessChunk = m_success ? m_successChunk : -1;
     m_pendingDeath = false;
     m_success = false;
     m_stopDecisions = false;
     m_runConverged = false;
+
+    if (m_modelTest) {
+        m_modelTest = false;
+        if (good) {
+            m_modelAccepted++;
+            applyRefineShift(m_testShift);
+            m_refineIndex++;
+            startRefineNote();
+            return true;
+        }
+        if (m_testShift > 0) m_posBad = m_testShift;
+        else m_negBad = m_testShift;
+        nextRefineTest();
+        return true;
+    }
 
     if (m_confirmingShift) {
         m_confirmingShift = false;
@@ -2293,6 +2947,7 @@ void Solver::finish(bool success, std::vector<uint8_t> const& seq, bool verified
         m_hasResult ? m_result.lanes[0].size() : 0, m_hasResult ? m_result.lanes[1].size() : 0,
         solveSeconds, m_totalSteps, m_failReason
     );
+    log::info("{}", statsLine());
 
     m_frozenElapsed = solveSeconds;
     m_stoppedPhase = m_phase;
@@ -2316,10 +2971,49 @@ void Solver::cleanup() {
     m_baseHashes.clear();
     m_testSeq.clear();
     m_optNotes.clear();
+    m_pendingHints.clear();
+    m_hintPath.clear();
+    m_hintPath.shrink_to_fit();
     m_objectIndex.clear();
     m_objectIndex.shrink_to_fit();
     m_request.importSeq.clear();
     m_request.progress.reset();
+}
+
+std::string Solver::statsLine() const {
+    auto ticks = [&](Phase phase) { return m_phaseTicks[static_cast<int>(phase)]; };
+    auto seconds = [&](Phase phase) { return m_phaseSeconds[static_cast<int>(phase)]; };
+    uint64_t polishTicks = ticks(Phase::Optimize) + ticks(Phase::Refine);
+    double polishSeconds = seconds(Phase::Optimize) + seconds(Phase::Refine);
+    uint64_t allTicks = 0;
+    double allSeconds = 0.0;
+    for (int i = 0; i < kPhaseCount; i++) {
+        allTicks += m_phaseTicks[i];
+        allSeconds += m_phaseSeconds[i];
+    }
+    std::string out = fmt::format(
+        "Solver stats: self-test {:.2f}s ({} ticks), search {:.2f}s ({} ticks, {} deaths, {} pruned, {} backtracks, {} hint jumps, "
+        "{} past the death), verify {:.2f}s ({} ticks), polish {:.2f}s ({} ticks, {} cleanups, {} moved{}), final check {:.2f}s ({} ticks), "
+        "checkpoints {} created / {} loaded / {} restarts ({:.2f}s), {:.1f} us/tick",
+        seconds(Phase::SelfTest), ticks(Phase::SelfTest), seconds(Phase::Search), ticks(Phase::Search), m_deaths, m_prunes,
+        m_backtracks, m_hintJumps, m_hintWins, seconds(Phase::Verify), ticks(Phase::Verify), polishSeconds, polishTicks,
+        m_optEdits, m_refineMoved, m_polishCut ? ", budget used" : "", seconds(Phase::FinalVerify), ticks(Phase::FinalVerify),
+        m_cpCreates, m_cpLoads, m_resets, m_cpSeconds, allTicks > 0 ? allSeconds * 1e6 / static_cast<double>(allTicks) : 0.0
+    );
+    if (m_plannerOn) {
+        auto const& stats = m_planner->stats();
+        out += fmt::format(
+            ", planner: {} objects, {} advised nodes, {} planned presses, {} hints ({} rejected), {} probes, {} pauses, {} plans ({} failed), "
+            "{} model mismatches, {} model windows ({} moved, {} kept), {:.2f}s planning | {}",
+            stats.mapObjects, m_advisedNodes, m_plannedPresses, stats.hints, m_hintRejects, m_probes, m_plannerPauses, stats.plans, stats.planFailures,
+            stats.modelMismatches, m_modelTried + m_modelSkipped, m_modelAccepted, m_modelSkipped, stats.planMicros * 1e-6,
+            m_planner->summary()
+        );
+    }
+    else {
+        out += ", planner: off";
+    }
+    return out;
 }
 
 std::string Solver::phaseNote() const {
@@ -2363,6 +3057,9 @@ std::string Solver::phaseNote() const {
             break;
         default:
             break;
+    }
+    if (m_stagedPolish && (m_phase == Phase::Optimize || m_phase == Phase::Refine)) {
+        note += fmt::format("  |  pass {}/{}", std::clamp(m_polishStage + 1, 1, kPolishStages), kPolishStages);
     }
     if (m_resumed && running()) {
         note += note.empty() ? "Resumed from saved progress" : "  |  Resumed from saved progress";
@@ -2411,6 +3108,12 @@ SolverView Solver::view() const {
         case Phase::Done: view.stepIndex = last; break;
         default: view.stepIndex = 0; break;
     }
+    if (m_stagedPolish && (shown == Phase::Optimize || shown == Phase::Refine)) {
+        int early = cleanIndex >= 0 ? cleanIndex : centerIndex;
+        int late = centerIndex >= 0 ? centerIndex : cleanIndex;
+        int idx = m_polishStage >= 2 ? late : early;
+        if (idx >= 0) view.stepIndex = idx;
+    }
 
     view.progress = progress();
     view.percent = m_maxPercent;
@@ -2420,10 +3123,18 @@ SolverView Solver::view() const {
     view.elapsed = elapsedSeconds();
     double elapsed = std::max(0.001, view.elapsed);
     view.gameSpeed = m_recentSpeed > 0.0 ? m_recentSpeed : static_cast<double>(m_totalSteps) / kTicksPerSecond / elapsed;
-    view.detail = fmt::format(
-        "{:.1f}%  |  {:.0f}x speed  |  {} backtracks  |  {} pruned",
-        view.percent, view.gameSpeed, m_backtracks, m_prunes
-    );
+    if (m_plannerOn) {
+        view.detail = fmt::format(
+            "{:.1f}%  |  {:.0f}x game speed  |  {} deaths  |  {} planned",
+            view.percent, view.gameSpeed, m_deaths, m_plannedPresses
+        );
+    }
+    else {
+        view.detail = fmt::format(
+            "{:.1f}%  |  {:.0f}x speed  |  {} backtracks  |  {} pruned",
+            view.percent, view.gameSpeed, m_backtracks, m_prunes
+        );
+    }
     view.note = phaseNote();
     return view;
 }
@@ -2456,6 +3167,12 @@ std::string Solver::detailLine() const {
         auto const& step = currentStep();
         out += fmt::format("  |  {} precision{}", tierName(step.tier), step.constraints || !m_constraintsActive ? "" : ", relaxed timing");
     }
+    if (m_plannerOn) {
+        out += fmt::format(
+            "  |  {} deaths, {} hint jumps ({} past the death), {} planned  |  {}",
+            m_deaths, m_hintJumps, m_hintWins, m_plannedPresses, m_planner->summary()
+        );
+    }
     return out;
 }
 
@@ -2471,9 +3188,13 @@ float Solver::progress() const {
         case Phase::FinalVerify:
             return m_seq.empty() ? 0.f : std::clamp(static_cast<float>(m_tick) / m_seq.size(), 0.f, 1.f);
         case Phase::Optimize:
-            return m_optNotes.empty() ? 1.f : std::clamp(static_cast<float>(m_optPosition) / m_optNotes.size(), 0.f, 1.f);
-        case Phase::Refine:
-            return m_refineNotes.empty() ? 1.f : static_cast<float>(m_refineIndex) / m_refineNotes.size();
+        case Phase::Refine: {
+            float f = m_phase == Phase::Optimize
+                ? (m_optNotes.empty() ? 1.f : std::clamp(static_cast<float>(m_optPosition) / m_optNotes.size(), 0.f, 1.f))
+                : (m_refineNotes.empty() ? 1.f : static_cast<float>(m_refineIndex) / m_refineNotes.size());
+            if (!m_stagedPolish) return f;
+            return std::clamp((static_cast<float>(std::clamp(m_polishStage, 0, kPolishStages - 1)) + std::clamp(f, 0.f, 1.f)) / kPolishStages, 0.f, 1.f);
+        }
         case Phase::Done: return 1.f;
         default: return 0.f;
     }

@@ -1,3 +1,16 @@
+# v2.1.0
+
+- **The solver now plans instead of guessing.** Before it touches the level, it reads every hitbox: blocks, spikes, portals, pads, orbs and speed changes. Within the first few ticks it also learns how each game mode moves. It then plans the inputs:
+  - cube jumps in the middle of the window where they are safe;
+  - ship, wave and UFO paths through their corridors, with a look-ahead.
+  The game then only has to confirm the plan. When a planned input still fails, the planner works out which earlier input caused it and retries from there, instead of trying every possibility.
+- **Much faster.** On test levels built like Stereo Madness (about 85 seconds long, cube and ship), a solve took about 3 seconds of estimated game time instead of 8 to 10 minutes. Ship- and wave-heavy test levels took under 2 seconds. These numbers come from a test setup that simulates Geometry Dash–style levels, not from timing inside the game itself.
+- **Cleaner charts.** Planned inputs need fewer notes, with no zig-zagging in ship and wave sections.
+- **Moving blocks** from move triggers are followed while planning.
+- With the planner on, cleaning up and centering the chart share a fixed budget, and the planner already puts presses in the middle of their windows.
+- **New setting:** "Plan inputs from the level's hitboxes" (on by default). Turn it off to use the previous search, which behaves exactly as before.
+- The solving screen shows how many inputs came from the plan. The log gets a "Solver stats" line with the time spent in each step.
+
 # v2.0.1
 
 - The mouse cursor is visible and free to move while the Rhythm Path menu or the solving screen is open. When you start playing, Geometry Dash's own "show cursor" and "lock cursor" options apply again.
